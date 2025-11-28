@@ -624,17 +624,19 @@ int enemyCanSeePlayer(int enemyIdx) {
     double dx = player.x - enemies[enemyIdx].x;
     double dy = player.y - enemies[enemyIdx].y;
     double dist = sqrt(dx*dx + dy*dy);
+    double stepX, stepY, rayX, rayY;
+    int steps, i;
 
     if (dist > ENEMY_FIRE_RANGE) return 0;
 
     /* Raycast to check for walls */
-    double stepX = dx / dist * 0.1;
-    double stepY = dy / dist * 0.1;
-    double rayX = enemies[enemyIdx].x;
-    double rayY = enemies[enemyIdx].y;
-    int steps = (int)(dist / 0.1);
+    stepX = dx / dist * 0.1;
+    stepY = dy / dist * 0.1;
+    rayX = enemies[enemyIdx].x;
+    rayY = enemies[enemyIdx].y;
+    steps = (int)(dist / 0.1);
 
-    for (int i = 0; i < steps; i++) {
+    for (i = 0; i < steps; i++) {
         rayX += stepX;
         rayY += stepY;
         if (worldMap[(int)rayY][(int)rayX] != 0) {
@@ -647,8 +649,9 @@ int enemyCanSeePlayer(int enemyIdx) {
 
 void updateEnemyAI(void) {
     clock_t now = clock();
+    int i;
 
-    for (int i = 0; i < numEnemies; i++) {
+    for (i = 0; i < numEnemies; i++) {
         if (!enemies[i].active) continue;
 
         /* Calculate direction to player */
@@ -987,13 +990,14 @@ void renderSprites(void) {
         if (screenX >= 0 && screenX < SCREEN_WIDTH && transformY < zBuffer[screenX]) {
             /* Draw projectile as bright dot */
             int size = (int)(8 / transformY);
+            int px, py, drawX, drawY;
             if (size < 1) size = 1;
             if (size > 10) size = 10;
 
-            for (int py = -size; py <= size; py++) {
-                for (int px = -size; px <= size; px++) {
-                    int drawX = screenX + px;
-                    int drawY = screenY + py;
+            for (py = -size; py <= size; py++) {
+                for (px = -size; px <= size; px++) {
+                    drawX = screenX + px;
+                    drawY = screenY + py;
                     if (drawX >= 0 && drawX < SCREEN_WIDTH &&
                         drawY >= 0 && drawY < SCREEN_HEIGHT) {
                         if (px*px + py*py <= size*size) {
@@ -1010,41 +1014,107 @@ void renderSprites(void) {
  * HUD
  *===========================================================================*/
 
-/* Simple 8x8 font */
-static unsigned char font8x8[128][8] = {
-    [0 ... 127] = {0},
-    ['0'] = {0x3C, 0x66, 0x6E, 0x76, 0x66, 0x66, 0x3C, 0x00},
-    ['1'] = {0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00},
-    ['2'] = {0x3C, 0x66, 0x06, 0x0C, 0x18, 0x30, 0x7E, 0x00},
-    ['3'] = {0x3C, 0x66, 0x06, 0x1C, 0x06, 0x66, 0x3C, 0x00},
-    ['4'] = {0x0C, 0x1C, 0x2C, 0x4C, 0x7E, 0x0C, 0x0C, 0x00},
-    ['5'] = {0x7E, 0x60, 0x7C, 0x06, 0x06, 0x66, 0x3C, 0x00},
-    ['6'] = {0x1C, 0x30, 0x60, 0x7C, 0x66, 0x66, 0x3C, 0x00},
-    ['7'] = {0x7E, 0x06, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x00},
-    ['8'] = {0x3C, 0x66, 0x66, 0x3C, 0x66, 0x66, 0x3C, 0x00},
-    ['9'] = {0x3C, 0x66, 0x66, 0x3E, 0x06, 0x0C, 0x38, 0x00},
-    ['A'] = {0x3C, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x66, 0x00},
-    ['H'] = {0x66, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x66, 0x00},
-    ['E'] = {0x7E, 0x60, 0x60, 0x7C, 0x60, 0x60, 0x7E, 0x00},
-    ['L'] = {0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x7E, 0x00},
-    ['T'] = {0x7E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00},
-    ['M'] = {0x63, 0x77, 0x7F, 0x6B, 0x63, 0x63, 0x63, 0x00},
-    ['O'] = {0x3C, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00},
-    ['S'] = {0x3C, 0x66, 0x60, 0x3C, 0x06, 0x66, 0x3C, 0x00},
-    ['C'] = {0x3C, 0x66, 0x60, 0x60, 0x60, 0x66, 0x3C, 0x00},
-    ['R'] = {0x7C, 0x66, 0x66, 0x7C, 0x6C, 0x66, 0x66, 0x00},
-    ['P'] = {0x7C, 0x66, 0x66, 0x7C, 0x60, 0x60, 0x60, 0x00},
-    [':'] = {0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00},
-    [' '] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-};
+/* Simple 8x8 font - initialized at runtime */
+static unsigned char font8x8[128][8];
+
+void initFont(void) {
+    int i, j;
+    /* Clear all */
+    for (i = 0; i < 128; i++) {
+        for (j = 0; j < 8; j++) {
+            font8x8[i][j] = 0;
+        }
+    }
+    /* Numbers */
+    font8x8['0'][0]=0x3C; font8x8['0'][1]=0x66; font8x8['0'][2]=0x6E; font8x8['0'][3]=0x76;
+    font8x8['0'][4]=0x66; font8x8['0'][5]=0x66; font8x8['0'][6]=0x3C;
+    font8x8['1'][0]=0x18; font8x8['1'][1]=0x38; font8x8['1'][2]=0x18; font8x8['1'][3]=0x18;
+    font8x8['1'][4]=0x18; font8x8['1'][5]=0x18; font8x8['1'][6]=0x7E;
+    font8x8['2'][0]=0x3C; font8x8['2'][1]=0x66; font8x8['2'][2]=0x06; font8x8['2'][3]=0x0C;
+    font8x8['2'][4]=0x18; font8x8['2'][5]=0x30; font8x8['2'][6]=0x7E;
+    font8x8['3'][0]=0x3C; font8x8['3'][1]=0x66; font8x8['3'][2]=0x06; font8x8['3'][3]=0x1C;
+    font8x8['3'][4]=0x06; font8x8['3'][5]=0x66; font8x8['3'][6]=0x3C;
+    font8x8['4'][0]=0x0C; font8x8['4'][1]=0x1C; font8x8['4'][2]=0x2C; font8x8['4'][3]=0x4C;
+    font8x8['4'][4]=0x7E; font8x8['4'][5]=0x0C; font8x8['4'][6]=0x0C;
+    font8x8['5'][0]=0x7E; font8x8['5'][1]=0x60; font8x8['5'][2]=0x7C; font8x8['5'][3]=0x06;
+    font8x8['5'][4]=0x06; font8x8['5'][5]=0x66; font8x8['5'][6]=0x3C;
+    font8x8['6'][0]=0x1C; font8x8['6'][1]=0x30; font8x8['6'][2]=0x60; font8x8['6'][3]=0x7C;
+    font8x8['6'][4]=0x66; font8x8['6'][5]=0x66; font8x8['6'][6]=0x3C;
+    font8x8['7'][0]=0x7E; font8x8['7'][1]=0x06; font8x8['7'][2]=0x0C; font8x8['7'][3]=0x18;
+    font8x8['7'][4]=0x30; font8x8['7'][5]=0x30; font8x8['7'][6]=0x30;
+    font8x8['8'][0]=0x3C; font8x8['8'][1]=0x66; font8x8['8'][2]=0x66; font8x8['8'][3]=0x3C;
+    font8x8['8'][4]=0x66; font8x8['8'][5]=0x66; font8x8['8'][6]=0x3C;
+    font8x8['9'][0]=0x3C; font8x8['9'][1]=0x66; font8x8['9'][2]=0x66; font8x8['9'][3]=0x3E;
+    font8x8['9'][4]=0x06; font8x8['9'][5]=0x0C; font8x8['9'][6]=0x38;
+    /* Letters */
+    font8x8['A'][0]=0x3C; font8x8['A'][1]=0x66; font8x8['A'][2]=0x66; font8x8['A'][3]=0x7E;
+    font8x8['A'][4]=0x66; font8x8['A'][5]=0x66; font8x8['A'][6]=0x66;
+    font8x8['B'][0]=0x7C; font8x8['B'][1]=0x66; font8x8['B'][2]=0x66; font8x8['B'][3]=0x7C;
+    font8x8['B'][4]=0x66; font8x8['B'][5]=0x66; font8x8['B'][6]=0x7C;
+    font8x8['C'][0]=0x3C; font8x8['C'][1]=0x66; font8x8['C'][2]=0x60; font8x8['C'][3]=0x60;
+    font8x8['C'][4]=0x60; font8x8['C'][5]=0x66; font8x8['C'][6]=0x3C;
+    font8x8['D'][0]=0x78; font8x8['D'][1]=0x6C; font8x8['D'][2]=0x66; font8x8['D'][3]=0x66;
+    font8x8['D'][4]=0x66; font8x8['D'][5]=0x6C; font8x8['D'][6]=0x78;
+    font8x8['E'][0]=0x7E; font8x8['E'][1]=0x60; font8x8['E'][2]=0x60; font8x8['E'][3]=0x7C;
+    font8x8['E'][4]=0x60; font8x8['E'][5]=0x60; font8x8['E'][6]=0x7E;
+    font8x8['F'][0]=0x7E; font8x8['F'][1]=0x60; font8x8['F'][2]=0x60; font8x8['F'][3]=0x7C;
+    font8x8['F'][4]=0x60; font8x8['F'][5]=0x60; font8x8['F'][6]=0x60;
+    font8x8['G'][0]=0x3C; font8x8['G'][1]=0x66; font8x8['G'][2]=0x60; font8x8['G'][3]=0x6E;
+    font8x8['G'][4]=0x66; font8x8['G'][5]=0x66; font8x8['G'][6]=0x3C;
+    font8x8['H'][0]=0x66; font8x8['H'][1]=0x66; font8x8['H'][2]=0x66; font8x8['H'][3]=0x7E;
+    font8x8['H'][4]=0x66; font8x8['H'][5]=0x66; font8x8['H'][6]=0x66;
+    font8x8['I'][0]=0x3C; font8x8['I'][1]=0x18; font8x8['I'][2]=0x18; font8x8['I'][3]=0x18;
+    font8x8['I'][4]=0x18; font8x8['I'][5]=0x18; font8x8['I'][6]=0x3C;
+    font8x8['K'][0]=0x66; font8x8['K'][1]=0x6C; font8x8['K'][2]=0x78; font8x8['K'][3]=0x70;
+    font8x8['K'][4]=0x78; font8x8['K'][5]=0x6C; font8x8['K'][6]=0x66;
+    font8x8['L'][0]=0x60; font8x8['L'][1]=0x60; font8x8['L'][2]=0x60; font8x8['L'][3]=0x60;
+    font8x8['L'][4]=0x60; font8x8['L'][5]=0x60; font8x8['L'][6]=0x7E;
+    font8x8['M'][0]=0x63; font8x8['M'][1]=0x77; font8x8['M'][2]=0x7F; font8x8['M'][3]=0x6B;
+    font8x8['M'][4]=0x63; font8x8['M'][5]=0x63; font8x8['M'][6]=0x63;
+    font8x8['N'][0]=0x66; font8x8['N'][1]=0x76; font8x8['N'][2]=0x7E; font8x8['N'][3]=0x7E;
+    font8x8['N'][4]=0x6E; font8x8['N'][5]=0x66; font8x8['N'][6]=0x66;
+    font8x8['O'][0]=0x3C; font8x8['O'][1]=0x66; font8x8['O'][2]=0x66; font8x8['O'][3]=0x66;
+    font8x8['O'][4]=0x66; font8x8['O'][5]=0x66; font8x8['O'][6]=0x3C;
+    font8x8['P'][0]=0x7C; font8x8['P'][1]=0x66; font8x8['P'][2]=0x66; font8x8['P'][3]=0x7C;
+    font8x8['P'][4]=0x60; font8x8['P'][5]=0x60; font8x8['P'][6]=0x60;
+    font8x8['R'][0]=0x7C; font8x8['R'][1]=0x66; font8x8['R'][2]=0x66; font8x8['R'][3]=0x7C;
+    font8x8['R'][4]=0x6C; font8x8['R'][5]=0x66; font8x8['R'][6]=0x66;
+    font8x8['S'][0]=0x3C; font8x8['S'][1]=0x66; font8x8['S'][2]=0x60; font8x8['S'][3]=0x3C;
+    font8x8['S'][4]=0x06; font8x8['S'][5]=0x66; font8x8['S'][6]=0x3C;
+    font8x8['T'][0]=0x7E; font8x8['T'][1]=0x18; font8x8['T'][2]=0x18; font8x8['T'][3]=0x18;
+    font8x8['T'][4]=0x18; font8x8['T'][5]=0x18; font8x8['T'][6]=0x18;
+    font8x8['U'][0]=0x66; font8x8['U'][1]=0x66; font8x8['U'][2]=0x66; font8x8['U'][3]=0x66;
+    font8x8['U'][4]=0x66; font8x8['U'][5]=0x66; font8x8['U'][6]=0x3C;
+    font8x8['V'][0]=0x66; font8x8['V'][1]=0x66; font8x8['V'][2]=0x66; font8x8['V'][3]=0x66;
+    font8x8['V'][4]=0x66; font8x8['V'][5]=0x3C; font8x8['V'][6]=0x18;
+    font8x8['W'][0]=0x63; font8x8['W'][1]=0x63; font8x8['W'][2]=0x63; font8x8['W'][3]=0x6B;
+    font8x8['W'][4]=0x7F; font8x8['W'][5]=0x77; font8x8['W'][6]=0x63;
+    font8x8['X'][0]=0x66; font8x8['X'][1]=0x66; font8x8['X'][2]=0x3C; font8x8['X'][3]=0x18;
+    font8x8['X'][4]=0x3C; font8x8['X'][5]=0x66; font8x8['X'][6]=0x66;
+    font8x8['Y'][0]=0x66; font8x8['Y'][1]=0x66; font8x8['Y'][2]=0x66; font8x8['Y'][3]=0x3C;
+    font8x8['Y'][4]=0x18; font8x8['Y'][5]=0x18; font8x8['Y'][6]=0x18;
+    font8x8['Z'][0]=0x7E; font8x8['Z'][1]=0x06; font8x8['Z'][2]=0x0C; font8x8['Z'][3]=0x18;
+    font8x8['Z'][4]=0x30; font8x8['Z'][5]=0x60; font8x8['Z'][6]=0x7E;
+    /* Symbols */
+    font8x8[':'][1]=0x18; font8x8[':'][2]=0x18; font8x8[':'][4]=0x18; font8x8[':'][5]=0x18;
+    font8x8['-'][3]=0x7E;
+    font8x8['+'][1]=0x18; font8x8['+'][2]=0x18; font8x8['+'][3]=0x7E;
+    font8x8['+'][4]=0x18; font8x8['+'][5]=0x18;
+    font8x8['!'][0]=0x18; font8x8['!'][1]=0x18; font8x8['!'][2]=0x18; font8x8['!'][3]=0x18;
+    font8x8['!'][4]=0x18; font8x8['!'][6]=0x18;
+    font8x8['.'][6]=0x18;
+}
 
 void drawChar(int x, int y, char c, unsigned char color) {
     unsigned char uc = (unsigned char)c;
+    int row, col;
+    unsigned char rowData;
+
     if (uc >= 128) return;
 
-    for (int row = 0; row < 8; row++) {
-        unsigned char rowData = font8x8[uc][row];
-        for (int col = 0; col < 8; col++) {
+    for (row = 0; row < 8; row++) {
+        rowData = font8x8[uc][row];
+        for (col = 0; col < 8; col++) {
             if (rowData & (0x80 >> col)) {
                 setPixel(x + col, y + row, color);
             }
@@ -1062,14 +1132,16 @@ void drawText(int x, int y, const char *text, unsigned char color) {
 
 void drawHUD(void) {
     char buffer[32];
+    int i, j;
+    unsigned char color;
 
     /* Health bar */
     drawText(5, 5, "HEALTH:", COLOR_WHITE);
-    for (int i = 0; i < 50; i++) {
-        unsigned char color = (i < player.health / 2) ?
+    for (i = 0; i < 50; i++) {
+        color = (i < player.health / 2) ?
             (player.health > 50 ? COLOR_LGREEN : (player.health > 25 ? COLOR_YELLOW : COLOR_LRED))
             : COLOR_GRAY;
-        for (int j = 0; j < 4; j++) {
+        for (j = 0; j < 4; j++) {
             setPixel(60 + i, 5 + j, color);
         }
     }
@@ -1135,30 +1207,214 @@ void handleInput(void) {
 }
 
 /*============================================================================
+ * SPLASH SCREEN - VGA MODE ASCII ART
+ *===========================================================================*/
+
+void drawSplashScreen(void) {
+    int x, y, i, px, py;
+    int centerX = SCREEN_WIDTH / 2;
+
+    clearScreen(COLOR_BLACK);
+
+    /* Draw cool border */
+    for (x = 0; x < SCREEN_WIDTH; x++) {
+        setPixel(x, 0, COLOR_LRED);
+        setPixel(x, 1, COLOR_RED);
+        setPixel(x, SCREEN_HEIGHT-2, COLOR_RED);
+        setPixel(x, SCREEN_HEIGHT-1, COLOR_LRED);
+    }
+    for (y = 0; y < SCREEN_HEIGHT; y++) {
+        setPixel(0, y, COLOR_LRED);
+        setPixel(1, y, COLOR_RED);
+        setPixel(SCREEN_WIDTH-2, y, COLOR_RED);
+        setPixel(SCREEN_WIDTH-1, y, COLOR_LRED);
+    }
+
+    /* MAZE RUNNER 2 title - big centered */
+    drawText(centerX - 56, 20, "MAZE RUNNER 2", COLOR_YELLOW);
+
+    /* Subtitle */
+    drawText(centerX - 64, 35, "THE NEXT LEVEL", COLOR_LRED);
+
+    /* Cool divider line */
+    for (x = 40; x < SCREEN_WIDTH - 40; x++) {
+        setPixel(x, 48, COLOR_CYAN);
+        setPixel(x, 49, COLOR_LCYAN);
+    }
+
+    /* Features list */
+    drawText(60, 60, "64X64 TEXTURES", COLOR_LGREEN);
+    drawText(60, 75, "ENEMIES SHOOT BACK!", COLOR_LRED);
+    drawText(60, 90, "WASD + MOUSE", COLOR_LCYAN);
+    drawText(60, 105, "PROJECTILE COMBAT", COLOR_YELLOW);
+
+    /* Draw some decorative pixels for cyberpunk feel */
+    for (i = 0; i < 50; i++) {
+        px = 20 + (rand() % 20);
+        py = 60 + (rand() % 60);
+        setPixel(px, py, COLOR_CYAN);
+        px = SCREEN_WIDTH - 20 - (rand() % 20);
+        setPixel(px, py, COLOR_CYAN);
+    }
+
+    /* Controls hint */
+    drawText(centerX - 72, 130, "WASD - MOVE", COLOR_WHITE);
+    drawText(centerX - 72, 142, "MOUSE - AIM", COLOR_WHITE);
+    drawText(centerX - 72, 154, "SPACE - FIRE", COLOR_WHITE);
+
+    /* Bottom divider */
+    for (x = 40; x < SCREEN_WIDTH - 40; x++) {
+        setPixel(x, 170, COLOR_CYAN);
+    }
+
+    /* Press key prompt */
+    drawText(centerX - 80, 185, "PRESS ANY KEY", COLOR_BWHITE);
+
+    displayFrame();
+}
+
+void drawCreditsScreen(void) {
+    int x;
+    int centerX = SCREEN_WIDTH / 2;
+
+    clearScreen(COLOR_BLACK);
+
+    /* Border */
+    for (x = 0; x < SCREEN_WIDTH; x++) {
+        setPixel(x, 0, COLOR_YELLOW);
+        setPixel(x, SCREEN_HEIGHT-1, COLOR_YELLOW);
+    }
+
+    /* Title */
+    drawText(centerX - 64, 20, "VONHOLTENCODES", COLOR_YELLOW);
+    drawText(centerX - 40, 35, "PRESENTS", COLOR_WHITE);
+
+    /* Game title */
+    drawText(centerX - 56, 60, "MAZE RUNNER 2", COLOR_LRED);
+
+    /* Credits */
+    drawText(centerX - 80, 90, "PROGRAMMING:", COLOR_CYAN);
+    drawText(centerX - 80, 102, "TRENT VON HOLTEN", COLOR_WHITE);
+
+    drawText(centerX - 80, 122, "ENGINE:", COLOR_CYAN);
+    drawText(centerX - 80, 134, "DDA RAYCASTING", COLOR_WHITE);
+
+    drawText(centerX - 80, 154, "YEAR: 2025", COLOR_GRAY);
+
+    /* Loading text */
+    drawText(centerX - 48, 180, "LOADING...", COLOR_LGREEN);
+
+    displayFrame();
+}
+
+/* Credit lines - static for C89 compatibility */
+static const char *credits[] = {
+    "",
+    "MAZE RUNNER 2",
+    "",
+    "THE NEXT LEVEL",
+    "",
+    "",
+    "CREATED BY",
+    "TRENT VON HOLTEN",
+    "",
+    "",
+    "PROGRAMMING",
+    "VONHOLTENCODES",
+    "",
+    "",
+    "ENGINE",
+    "DDA RAYCASTING",
+    "64X64 TEXTURES",
+    "",
+    "",
+    "FEATURES",
+    "ENEMIES SHOOT BACK",
+    "PROJECTILE SYSTEM",
+    "WASD + MOUSE",
+    "",
+    "",
+    "SPECIAL THANKS",
+    "ID SOFTWARE",
+    "DJGPP TEAM",
+    "",
+    "",
+    "YEAR 2025",
+    "",
+    "",
+    "THANKS FOR PLAYING!",
+    "",
+    "",
+    "",
+    "PRESS ANY KEY",
+    "",
+    ""
+};
+
+void drawScrollingCredits(void) {
+    int scrollY, x, y, frame;
+    int numLines = 40;
+    int lineHeight = 12;
+    int sx, sy, len, textX, textY;
+    unsigned char color;
+    clock_t startTime = clock();
+
+    for (frame = 0; frame < 400; frame++) {
+        /* Check for keypress to skip */
+        if (kbhit()) {
+            getch();
+            break;
+        }
+
+        clearScreen(COLOR_BLACK);
+
+        /* Draw starfield background */
+        srand(12345);
+        for (y = 0; y < 50; y++) {
+            sx = rand() % SCREEN_WIDTH;
+            sy = (rand() % SCREEN_HEIGHT + frame) % SCREEN_HEIGHT;
+            setPixel(sx, sy, COLOR_WHITE);
+        }
+
+        /* Draw scrolling text */
+        scrollY = SCREEN_HEIGHT - frame * 2;
+
+        for (y = 0; y < numLines; y++) {
+            textY = scrollY + y * lineHeight;
+            if (textY >= -10 && textY < SCREEN_HEIGHT) {
+                len = strlen(credits[y]);
+                textX = (SCREEN_WIDTH - len * 8) / 2;
+                color = COLOR_WHITE;
+
+                /* Color based on content */
+                if (strstr(credits[y], "MAZE RUNNER") != NULL) color = COLOR_YELLOW;
+                else if (strstr(credits[y], "TRENT") != NULL) color = COLOR_LCYAN;
+                else if (strstr(credits[y], "VONHOLTEN") != NULL) color = COLOR_LGREEN;
+                else if (strstr(credits[y], "THANKS") != NULL) color = COLOR_LRED;
+                else if (strstr(credits[y], "2025") != NULL) color = COLOR_GRAY;
+
+                drawText(textX, textY, credits[y], color);
+            }
+        }
+
+        /* Draw border */
+        for (x = 0; x < SCREEN_WIDTH; x++) {
+            setPixel(x, 0, COLOR_RED);
+            setPixel(x, SCREEN_HEIGHT-1, COLOR_RED);
+        }
+
+        displayFrame();
+
+        /* Slow down scroll */
+        while ((clock() - startTime) * 1000 / CLOCKS_PER_SEC < frame * 50);
+    }
+}
+
+/*============================================================================
  * MAIN
  *===========================================================================*/
 
 int main(void) {
-    printf("\n");
-    printf("========================================\n");
-    printf("  MAZE RUNNER 2 - P4 ERA EDITION\n");
-    printf("========================================\n");
-    printf("  Targeting: Pentium 4 / 1.5GHz+\n");
-    printf("  Resolution: 320x200 VGA\n");
-    printf("  Textures: 64x64 Procedural\n");
-    printf("\n");
-    printf("  NEW FEATURES:\n");
-    printf("  - High-res wall textures\n");
-    printf("  - ENEMIES SHOOT BACK!\n");
-    printf("  - Projectile system\n");
-    printf("  - WASD + Mouse controls\n");
-    printf("\n");
-    printf("  VonHoltenCodes 2025\n");
-    printf("========================================\n");
-    printf("\n");
-    printf("  Press any key to start...\n");
-    getch();
-
 #ifdef __DJGPP__
     if (!__djgpp_nearptr_enable()) {
         printf("ERROR: Could not enable near pointers!\n");
@@ -1168,6 +1424,7 @@ int main(void) {
 
     /* Initialize systems */
     initDoubleBuffer();
+    initFont();
     initTextures();
     initPlayer();
     initProjectiles();
@@ -1176,6 +1433,14 @@ int main(void) {
 
     /* Enter VGA mode */
     setVideoMode(0x13);
+
+    /* Show credits splash */
+    drawCreditsScreen();
+    delay(1500);
+
+    /* Show main splash screen */
+    drawSplashScreen();
+    getch();
 
     gameStartTime = clock();
 
@@ -1192,19 +1457,27 @@ int main(void) {
         displayFrame();
     }
 
+    /* Show scrolling credits */
+    drawScrollingCredits();
+
     /* Return to text mode */
     setVideoMode(0x03);
 
     printf("\n");
     printf("========================================\n");
-    printf("  GAME OVER\n");
+    if (player.health <= 0) {
+        printf("          GAME OVER\n");
+    } else {
+        printf("       ESCAPE SUCCESSFUL!\n");
+    }
     printf("========================================\n");
     printf("  Final Score: %d\n", player.score);
-    printf("  Health: %d\n", player.health);
     printf("========================================\n");
-    printf("  VonHoltenCodes 2025\n");
-    printf("  MAZE RUNNER 2 - P4 ERA EDITION\n");
-    printf("========================================\n");
+    printf("\n");
+    printf("  MAZE RUNNER 2\n");
+    printf("  By VonHoltenCodes 2025\n");
+    printf("  Thanks for playing!\n");
+    printf("\n");
 
     freeDoubleBuffer();
 

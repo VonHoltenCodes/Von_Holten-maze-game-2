@@ -10,8 +10,9 @@
 # DJGPP Cross-compiler
 CC = i586-pc-msdosdjgpp-gcc
 
-# P4-era optimizations - more aggressive than 133MHz target
-CFLAGS = -Wall -O3 -march=pentium4 -ffast-math -funroll-loops -DMAZE_RUNNER_2
+# Optimizations - compatible with Pentium and above
+# Note: -march=pentium4 causes SIGILL on older CPUs, use i586 for compatibility
+CFLAGS = -Wall -O2 -march=i586 -ffast-math -funroll-loops -DMAZE_RUNNER_2
 
 LDFLAGS = -lm -s
 
