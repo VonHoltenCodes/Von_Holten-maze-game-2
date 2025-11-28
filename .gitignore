@@ -1,0 +1,11 @@
+# Build artifacts
+*.o
+*.obj
+
+# Keep executables for easy distribution
+# *.EXE
+# *.exe
+
+# Floppy images
+*.IMG
+*.img
