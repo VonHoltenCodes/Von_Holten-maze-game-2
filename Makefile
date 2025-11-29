@@ -2,7 +2,7 @@
 # MAKEFILE - MAZE RUNNER 2 - P4 ERA DOS RAYCASTER
 #
 # Targeting Pentium 4 era hardware (1.5GHz+)
-# High-res textures, enemies that shoot back, advanced combat
+# Sound Blaster/AdLib audio, 32x32 enemy sprites
 #
 # By: VonHoltenCodes (2025)
 #############################################################################
@@ -11,16 +11,15 @@
 CC = i586-pc-msdosdjgpp-gcc
 
 # Optimizations - compatible with Pentium and above
-# Note: -march=pentium4 causes SIGILL on older CPUs, use i586 for compatibility
-CFLAGS = -Wall -O2 -march=i586 -ffast-math -funroll-loops -DMAZE_RUNNER_2
+CFLAGS = -Wall -O2 -march=i586 -ffast-math -funroll-loops -DMAZE_RUNNER_2 -I.
 
 LDFLAGS = -lm -s
 
 # Target executable
 TARGET = MAZE2.EXE
 
-# Source files
-SOURCES = maze2.c
+# Source files - main game + audio modules
+SOURCES = maze2.c adlib.c sound.c
 
 # Object files
 OBJECTS = $(SOURCES:.c=.o)
@@ -41,12 +40,11 @@ $(TARGET): $(OBJECTS)
 	@echo " Executable: $(TARGET)"
 	@echo " Size: $$(ls -lh $(TARGET) 2>/dev/null | awk '{print $$5}' || echo 'N/A')"
 	@echo ""
-	@echo " P4-ERA FEATURES:"
-	@echo "  - 64x64 procedural textures"
-	@echo "  - Enemies that SHOOT BACK"
-	@echo "  - Projectile system"
+	@echo " FEATURES:"
+	@echo "  - Sound Blaster/AdLib FM audio"
+	@echo "  - 32x32 detailed enemy sprites"
+	@echo "  - Stone masonry wall textures"
 	@echo "  - WASD + Mouse controls"
-	@echo "  - Distance fog effects"
 	@echo "========================================="
 
 %.o: %.c
@@ -54,7 +52,7 @@ $(TARGET): $(OBJECTS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJECTS) $(TARGET)
+	rm -f $(OBJECTS) $(TARGET) *.o
 	@echo "Build files cleaned"
 
 # Create floppy image

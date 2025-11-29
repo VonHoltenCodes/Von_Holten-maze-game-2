@@ -6,17 +6,43 @@
  * Based on Von_Holten-Maze-Game v3.0 foundation
  *
  * NEW FEATURES:
- * - 64x64 high-resolution wall textures
+ * - 64x64 high-resolution wall textures with complex structure
  * - Enemies that SHOOT BACK with projectile system
- * - Smooth shading and lighting effects
- * - Procedural brick/stone textures
- * - Multiple weapon types
+ * - PC Speaker sound effects (shoot, hit, death, pickup)
+ * - Procedural brick/stone/metal textures with depth
+ * - Doom-style HUD with mini map
  * - Advanced enemy AI with ranged attacks
  *
  * TARGET: Pentium 4, 256MB RAM, VGA Mode 13h (320x200x256)
  *
  * By: VonHoltenCodes (2025)
  * License: Open Source
+ *
+ * =============================================================================
+ * CODE INDEX - Jump to any section by searching for [SEC-XX]
+ * =============================================================================
+ *
+ * [SEC-01] CONFIGURATION          - Screen, texture, combat settings
+ * [SEC-02] DATA STRUCTURES        - Player, Enemy, Projectile structs
+ * [SEC-03] LIGHTING SYSTEM        - Torch and fire particle systems
+ * [SEC-04] WEAPON SPRITE          - 60x40 pistol bitmap data
+ * [SEC-05] ENEMY SPRITES          - 24x32 grunt/soldier/elite bitmaps
+ * [SEC-06] GLOBAL STATE           - Buffers, textures, game state vars
+ * [SEC-07] LEVEL DATA             - worldMap[24][24] level definition
+ * [SEC-08] SOUND SYSTEM           - PC Speaker sound effects
+ * [SEC-09] TEXTURE GENERATION     - Procedural 64x64 wall textures
+ * [SEC-10] VGA GRAPHICS           - Mode 13h, double buffering, palette
+ * [SEC-11] INPUT HANDLING         - Keyboard state reader, mouse
+ * [SEC-12] PROJECTILE SYSTEM      - Player and enemy projectiles
+ * [SEC-13] ENEMY AI               - Movement, targeting, shooting AI
+ * [SEC-14] PLAYER                 - Movement, collision, shooting
+ * [SEC-15] RENDERING              - DDA raycasting, textured walls
+ * [SEC-16] SPRITE RENDERING       - Z-sorted billboard enemy sprites
+ * [SEC-17] HUD & MINIMAP          - Doom-style status bar, mini map
+ * [SEC-18] SPLASH SCREENS         - Title, credits, scrolling end
+ * [SEC-19] MAIN                   - Game loop, initialization, cleanup
+ *
+ * =============================================================================
  */
 
 #include <stdio.h>
@@ -35,8 +61,22 @@
 #include <pc.h>
 #endif
 
+/* Working audio from original maze game */
+#include "adlib.h"
+
+/* MIDI music playback from shdon.com */
+#include "MIDIPLAY.C"
+
+/* 64x64 enemy sprites - hand-drawn pixel art */
+#include "sprites/sprite_creeper.h"
+#include "sprites/sprite_snowman.h"
+#include "sprites/sprite_minion.h"
+
+/* Sprite dimensions for 64x64 */
+#define ENEMY_SPRITE_SIZE 64
+
 /*============================================================================
- * CONFIGURATION - P4 ERA SETTINGS
+ * [SEC-01] CONFIGURATION - P4 ERA SETTINGS
  *===========================================================================*/
 
 #define SCREEN_WIDTH 320
@@ -82,6 +122,7 @@
 #define COLOR_LMAGENTA 13
 #define COLOR_YELLOW 14
 #define COLOR_BWHITE 15
+#define COLOR_DGRAY 8  /* Dark gray (same as GRAY in VGA palette) */
 
 /* Wall types */
 #define WALL_NONE 0
@@ -91,7 +132,7 @@
 #define WALL_TECH 4
 
 /*============================================================================
- * DATA STRUCTURES
+ * [SEC-02] DATA STRUCTURES
  *===========================================================================*/
 
 typedef struct {
@@ -117,10 +158,14 @@ typedef struct {
     double spawnX, spawnY;
     int active;
     int health;
+    int maxHealth;         /* For respawn */
     int type;              /* Enemy type */
     clock_t lastFireTime;  /* When enemy last shot */
+    clock_t deathTime;     /* When enemy died (for respawn) */
     int canShoot;          /* Does this enemy type shoot? */
 } Enemy;
+
+#define ENEMY_RESPAWN_TIME 10000  /* 10 seconds to respawn */
 
 /* Enemy types */
 #define ENEMY_GRUNT 0      /* Basic, doesn't shoot */
@@ -131,7 +176,112 @@ typedef struct {
 #define MAX_ENEMIES 20
 
 /*============================================================================
- * GLOBAL STATE
+ * DYNAMIC LIGHTING SYSTEM - Torches with animated flames
+ *===========================================================================*/
+
+#define MAX_TORCHES 16
+#define TORCH_LIGHT_RADIUS 6.0
+#define TORCH_FLICKER_SPEED 200
+
+/* Torch structure */
+typedef struct {
+    double x, y;
+    int active;
+    int animFrame;
+    double intensity;
+    clock_t lastFlicker;
+} Torch;
+
+/* Fire particle structure */
+typedef struct {
+    double x, y, z;
+    double vx, vy, vz;
+    int life;
+    unsigned char color;
+} FireParticle;
+
+#define MAX_FIRE_PARTICLES 64
+
+/*============================================================================
+ * WEAPON SPRITE - 60x40 pistol
+ *===========================================================================*/
+
+#define WEAPON_WIDTH 60
+#define WEAPON_HEIGHT 40
+
+/* Pistol sprite - hand holding gun (0=transparent) */
+static unsigned char weaponSprite[WEAPON_WIDTH * WEAPON_HEIGHT] = {
+    /* Rows 0-20: Empty */
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    /* Row 20-21: Gun barrel tip */
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,8,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,7,7,7,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    /* Row 22-25: Gun body */
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,7,7,15,15,7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,7,7,15,15,7,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,7,7,15,7,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,7,7,7,7,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    /* Row 26-30: Gun grip/trigger */
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,7,6,6,6,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,6,6,6,6,6,6,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,6,6,6,6,6,6,6,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,6,6,6,6,6,6,6,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,6,6,6,6,6,6,6,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    /* Row 31-35: Hand holding gun */
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,14,14,6,6,14,14,6,6,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,14,14,14,6,6,14,14,14,6,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,14,14,14,14,14,14,14,14,6,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,14,14,14,14,14,14,14,14,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,14,14,14,14,14,14,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    /* Row 36-39: More hand */
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,14,14,14,14,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,14,14,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+};
+
+/*============================================================================
+ * [SEC-05] ENEMY SPRITES - 32x32 detailed sprites from original maze game
+ * Using actual bitmap sprites from sprite header files
+ *===========================================================================*/
+
+/* Sprite sizes - using 32x32 sprites from original game */
+#define ENEMY_SPRITE_WIDTH 64
+#define ENEMY_SPRITE_HEIGHT 64
+
+/* Sprite pointers mapped to enemy types */
+/* ENEMY_GRUNT   -> enemy_gremlin (purple gremlin) */
+/* ENEMY_SOLDIER -> minion_jump (jumping minion) */
+/* ENEMY_ELITE   -> enemy_creeper */
+/* ENEMY_BOSS    -> enemy_tomato (boss tomato) */
+
+/* Initialize sprites - just need to verify headers loaded */
+void initEnemySprites(void) {
+    /* Sprites are already defined in header files as static arrays */
+    /* enemy_gremlin[1024], minion_jump[1024], etc. */
+}
+
+/*============================================================================
+ * [SEC-06] GLOBAL STATE
  *===========================================================================*/
 
 /* VGA memory pointer */
@@ -160,114 +310,225 @@ static int numEnemies = 0;
 static clock_t gameStartTime;
 static int gameRunning = 1;
 
+/* Dynamic lighting */
+static Torch torches[MAX_TORCHES];
+static int numTorches = 0;
+static FireParticle fireParticles[MAX_FIRE_PARTICLES];
+
+/* Sound state */
+static int soundEnabled = 1;  /* Enable sound by default */
+
 /* P4 ERA: 64x64 procedural textures */
 static unsigned char wallTextures[4][TEX_SIZE * TEX_SIZE];
 
-/* Map layout */
+/*============================================================================
+ * [SEC-08] SOUND SYSTEM - Sound Blaster PCM + AdLib FM Music
+ * Uses working modules from original maze game (sound.c, adlib.c)
+ *===========================================================================*/
+
+/* External functions from sound.c */
+extern int initAudio(void);
+extern void playToneBlocking(int frequency, int durationMs);
+extern void shutdownAudio(void);
+extern int isAudioAvailable(void);
+
+/* Initialize sound - calls working audio module */
+void initSound(void) {
+    if (!soundEnabled) return;
+    initAudio();       /* Sound Blaster PCM from sound.c */
+    initAdLib();       /* AdLib FM music from adlib.c */
+}
+
+/* Sound effects using Sound Blaster PCM */
+void soundShoot(void) {
+    if (!soundEnabled) return;
+    playToneBlocking(400, 20);
+    playToneBlocking(200, 15);
+}
+
+void soundHit(void) {
+    if (!soundEnabled) return;
+    playToneBlocking(150, 25);
+}
+
+void soundEnemyDeath(void) {
+    if (!soundEnabled) return;
+    playToneBlocking(250, 40);
+    playToneBlocking(120, 50);
+    playToneBlocking(60, 60);
+}
+
+void soundPlayerHurt(void) {
+    if (!soundEnabled) return;
+    playToneBlocking(80, 50);
+}
+
+void soundPickup(void) {
+    if (!soundEnabled) return;
+    playToneBlocking(600, 20);
+    playToneBlocking(800, 20);
+    playToneBlocking(1000, 25);
+}
+
+static clock_t lastFootstep = 0;
+#define FOOTSTEP_INTERVAL 400  /* ms between footsteps */
+
+void soundStep(void) {
+    clock_t now = clock();
+    long elapsed = (now - lastFootstep) * 1000 / CLOCKS_PER_SEC;
+    if (elapsed < FOOTSTEP_INTERVAL) return;
+
+    if (!soundEnabled) return;
+    /* Low thud for footstep */
+    playToneBlocking(60, 15);
+    lastFootstep = now;
+}
+
+void updateSound(void) {
+    if (!soundEnabled) return;
+    updateMusic();  /* Update AdLib music from adlib.c */
+}
+
+/*============================================================================
+ * [SEC-07] LEVEL DATA - Single well-crafted dungeon level
+ *
+ * Wall types: 1=Brick, 2=Stone, 3=Metal, 4=Tech
+ * Player starts at (2,2), exit is at the opposite corner
+ *
+ * Layout concept:
+ * - Dungeon entrance (stone) in NW corner
+ * - Central hub with pillars
+ * - Prison block (brick) in SW
+ * - Armory (metal) in NE
+ * - Control room (tech) in SE
+ *===========================================================================*/
 static int worldMap[MAP_HEIGHT][MAP_WIDTH] = {
-    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-    {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1},
-    {1,0,2,2,2,2,0,3,3,3,3,0,4,4,4,4,0,2,2,2,2,2,0,1},
-    {1,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,1},
-    {1,0,2,0,1,1,1,0,1,1,1,1,1,1,0,1,1,1,0,1,0,2,0,1},
-    {1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,1},
-    {1,0,3,0,1,0,2,2,2,0,3,3,3,0,4,0,0,1,0,1,0,3,0,1},
-    {1,0,3,0,0,0,2,0,2,0,3,0,3,0,4,0,0,0,0,1,0,3,0,1},
-    {1,0,3,0,1,0,2,0,2,0,3,0,3,0,4,4,4,1,0,1,0,3,0,1},
-    {1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,1},
-    {1,1,1,1,1,0,1,1,1,1,1,0,1,1,1,1,1,1,0,1,1,1,1,1},
-    {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1},
-    {1,0,4,4,4,0,2,0,3,3,3,3,3,3,3,0,2,0,4,4,4,4,0,1},
-    {1,0,4,0,0,0,2,0,0,0,0,0,0,0,0,0,2,0,0,0,0,4,0,1},
-    {1,0,4,0,1,1,2,1,1,0,1,1,1,0,1,1,2,1,1,0,0,4,0,1},
-    {1,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,0,1},
-    {1,0,3,0,1,1,1,1,1,0,1,0,1,0,1,1,1,1,1,0,3,3,0,1},
-    {1,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,1},
-    {1,0,3,3,3,0,2,2,2,2,2,2,2,2,2,2,2,0,3,3,3,0,0,1},
-    {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1},
-    {1,0,1,1,1,1,1,0,1,1,1,1,1,1,0,1,1,1,1,1,1,1,0,1},
-    {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1},
-    {1,0,2,2,2,2,2,2,2,2,2,0,0,2,2,2,2,2,2,2,2,2,0,1},
-    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1}
+    /* Row 0: Northern outer wall */
+    {2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2},
+    /* Row 1: Dungeon entrance corridor */
+    {2,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0,3},
+    /* Row 2: START area (stone dungeon) */
+    {2,0,2,2,0,2,0,2,2,2,2,2,0,2,2,0,0,0,3,0,3,3,0,3},
+    /* Row 3: Dungeon cells */
+    {2,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,3,0,0,0,0,3,0,3},
+    /* Row 4: */
+    {2,2,2,0,2,2,2,2,0,2,0,2,2,2,2,0,3,3,3,0,0,0,0,3},
+    /* Row 5: Corridor to central hub */
+    {2,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,3,3,3,3},
+    /* Row 6: */
+    {2,0,2,2,2,0,2,2,0,2,0,1,1,1,1,1,0,3,0,0,0,0,0,3},
+    /* Row 7: Central hub entrance */
+    {2,0,0,0,2,0,0,0,0,0,0,1,0,0,0,1,0,3,0,3,3,3,0,3},
+    /* Row 8: Central hub with pillars */
+    {1,1,1,0,1,1,1,0,1,0,0,1,0,2,0,1,0,0,0,3,0,0,0,3},
+    /* Row 9: Hub center */
+    {1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,3,0,4,4,4},
+    /* Row 10: Hub pillars */
+    {1,0,1,0,0,0,1,0,1,0,0,1,0,2,0,1,0,4,0,0,0,4,0,4},
+    /* Row 11: Hub south */
+    {1,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,0,4,0,4,0,4,0,4},
+    /* Row 12: Prison block entrance */
+    {1,0,1,0,0,0,1,0,1,1,1,1,1,0,1,1,0,4,0,4,0,0,0,4},
+    /* Row 13: Prison corridor */
+    {1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,4,0,4,4,0,4,4},
+    /* Row 14: Prison cells west */
+    {1,0,1,0,1,0,1,1,1,0,4,4,4,4,0,4,0,0,0,0,0,0,0,4},
+    /* Row 15: */
+    {1,0,1,0,0,0,0,0,0,0,4,0,0,4,0,4,4,4,0,4,4,4,0,4},
+    /* Row 16: */
+    {1,0,1,1,1,0,1,1,0,0,4,0,0,0,0,0,0,0,0,0,0,4,0,4},
+    /* Row 17: */
+    {1,0,0,0,0,0,0,1,0,0,4,4,0,4,4,4,0,4,4,4,0,4,0,4},
+    /* Row 18: */
+    {1,1,1,0,1,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4},
+    /* Row 19: Tech control room area */
+    {1,0,0,0,0,1,0,0,0,4,4,4,0,4,0,4,4,4,0,4,4,4,0,4},
+    /* Row 20: */
+    {1,0,1,1,0,1,1,1,0,4,0,0,0,4,0,0,0,0,0,4,0,0,0,4},
+    /* Row 21: EXIT corridor */
+    {1,0,0,0,0,0,0,0,0,4,0,4,4,4,0,4,4,4,0,4,0,4,0,4},
+    /* Row 22: EXIT area */
+    {1,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0},
+    /* Row 23: Southern outer wall */
+    {1,1,1,1,1,1,1,1,1,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4}
 };
 
 /*============================================================================
- * P4 ERA: PROCEDURAL TEXTURE GENERATION
- * Generate high-quality 64x64 textures at runtime
+ * [SEC-09] TEXTURE GENERATION - Clean procedural 64x64 textures
+ * Original simple textures that looked good
  *===========================================================================*/
 
-/* Generate brick wall texture */
+/* Generate stone block texture - grayscale for proper lighting */
+/* Uses colors 16-31 (VGA grayscale ramp) */
 void generateBrickTexture(unsigned char *tex) {
     int x, y;
-    int brickW = 16, brickH = 8;
+    int blockW = 16, blockH = 8;
 
     for (y = 0; y < TEX_SIZE; y++) {
         for (x = 0; x < TEX_SIZE; x++) {
-            int bx = x % brickW;
-            int by = y % brickH;
-            int row = y / brickH;
+            int bx = x % blockW;
+            int by = y % blockH;
+            int row = y / blockH;
 
-            /* Offset every other row */
+            /* Offset every other row for stone block pattern */
             if (row % 2 == 1) {
-                bx = (x + brickW / 2) % brickW;
+                bx = (x + blockW / 2) % blockW;
             }
 
-            /* Mortar lines */
+            /* Mortar lines - dark */
             if (bx == 0 || by == 0) {
-                tex[y * TEX_SIZE + x] = COLOR_GRAY;
+                tex[y * TEX_SIZE + x] = 17;  /* Very dark gray mortar */
             } else {
-                /* Brick color with variation */
-                int shade = 4 + (rand() % 3);  /* Red shades */
-                /* Add some noise for texture */
-                if (rand() % 8 == 0) shade = COLOR_BROWN;
+                /* Stone color - grayscale with variation */
+                int shade = 21 + (rand() % 3);  /* Base mid-gray */
+                if (rand() % 6 == 0) shade = 18;  /* Dark spot */
+                if (rand() % 8 == 0) shade = 24;  /* Light spot */
                 tex[y * TEX_SIZE + x] = shade;
             }
         }
     }
 }
 
-/* Generate stone wall texture */
+/* Generate rough stone texture - grayscale for proper lighting */
+/* Uses colors 16-31 (VGA grayscale ramp) */
 void generateStoneTexture(unsigned char *tex) {
     int x, y;
 
-    /* Fill with base gray */
     for (y = 0; y < TEX_SIZE; y++) {
         for (x = 0; x < TEX_SIZE; x++) {
-            int base = 7 + (rand() % 2);  /* White/gray base */
-
-            /* Add darker stone outlines */
-            int blockX = x / 12;
-            int blockY = y / 10;
             int localX = x % 12;
             int localY = y % 10;
 
+            /* Mortar lines between blocks */
             if (localX == 0 || localY == 0) {
-                base = COLOR_GRAY;  /* Mortar */
+                tex[y * TEX_SIZE + x] = 16;  /* Nearly black mortar */
+            } else {
+                /* Stone face - grayscale with variation */
+                int base = 20 + (rand() % 4);  /* Mid-dark gray */
+                if (rand() % 8 == 0) base = 17;  /* Dark spot */
+                if (rand() % 10 == 0) base = 25; /* Light highlight */
+                tex[y * TEX_SIZE + x] = base;
             }
-
-            /* Random dark spots for texture */
-            if (rand() % 12 == 0) base = COLOR_GRAY;
-
-            tex[y * TEX_SIZE + x] = base;
         }
     }
 }
 
-/* Generate metal panel texture */
+/* Generate metal/dungeon door texture - grayscale */
+/* Uses colors 16-31 (VGA grayscale ramp) */
 void generateMetalTexture(unsigned char *tex) {
     int x, y;
 
     for (y = 0; y < TEX_SIZE; y++) {
         for (x = 0; x < TEX_SIZE; x++) {
-            /* Base gray metal */
-            int base = 8;  /* Dark gray */
+            /* Base dark metal */
+            int base = 19;  /* Dark gray metal */
 
             /* Vertical ridges */
-            if (x % 8 == 0) base = 7;  /* Lighter ridge */
-            if (x % 8 == 1) base = 0;  /* Shadow */
+            if (x % 8 == 0) base = 22;  /* Lighter ridge */
+            if (x % 8 == 1) base = 16;  /* Shadow */
 
             /* Horizontal seams */
-            if (y % 32 == 0 || y % 32 == 1) base = 0;
+            if (y % 32 == 0 || y % 32 == 1) base = 16;  /* Dark seam */
 
             /* Rivets */
             int rivetX = x % 16;
@@ -275,9 +536,9 @@ void generateMetalTexture(unsigned char *tex) {
             if (rivetX >= 6 && rivetX <= 9 && rivetY >= 6 && rivetY <= 9) {
                 if (rivetX == 7 || rivetX == 8) {
                     if (rivetY == 7 || rivetY == 8) {
-                        base = 15;  /* Bright rivet center */
+                        base = 27;  /* Bright rivet center */
                     } else {
-                        base = 7;  /* Rivet edge */
+                        base = 24;  /* Light gray rivet edge */
                     }
                 }
             }
@@ -287,33 +548,30 @@ void generateMetalTexture(unsigned char *tex) {
     }
 }
 
-/* Generate tech/circuit texture */
+/* Generate rough hewn stone texture - grayscale */
+/* Uses colors 16-31 (VGA grayscale ramp) - same as others for consistency */
 void generateTechTexture(unsigned char *tex) {
     int x, y;
 
     for (y = 0; y < TEX_SIZE; y++) {
         for (x = 0; x < TEX_SIZE; x++) {
-            /* Dark blue base */
-            int base = COLOR_BLUE;
+            /* Rough stone with larger blocks */
+            int blockX = x / 16;
+            int blockY = y / 16;
+            int localX = x % 16;
+            int localY = y % 16;
 
-            /* Circuit traces */
-            if (x % 16 == 8 || y % 16 == 8) {
-                base = COLOR_CYAN;  /* Trace lines */
+            /* Deep cracks between large stones */
+            if (localX == 0 || localY == 0) {
+                tex[y * TEX_SIZE + x] = 16;  /* Black crack */
+            } else {
+                /* Vary shade by block for variety */
+                int base = 19 + ((blockX + blockY) % 3);
+                /* Add noise */
+                if (rand() % 5 == 0) base = 17;
+                if (rand() % 7 == 0) base = 23;
+                tex[y * TEX_SIZE + x] = base;
             }
-
-            /* Connection nodes */
-            int nodeX = x % 16;
-            int nodeY = y % 16;
-            if (nodeX >= 6 && nodeX <= 10 && nodeY >= 6 && nodeY <= 10) {
-                if (x % 16 == 8 && y % 16 == 8) {
-                    base = COLOR_LCYAN;  /* Bright node */
-                }
-            }
-
-            /* Random LED-like dots */
-            if (rand() % 64 == 0) base = COLOR_LGREEN;
-
-            tex[y * TEX_SIZE + x] = base;
         }
     }
 }
@@ -372,6 +630,107 @@ void setVideoMode(int mode) {
     regs.h.ah = 0x00;
     regs.h.al = mode;
     int86(0x10, &regs, &regs);
+}
+
+/* Set up custom dark dungeon palette for stone walls */
+void setupDungeonPalette(void) {
+    int i;
+
+    /* Wait for vertical retrace */
+    while ((inp(0x3DA) & 0x08));
+    while (!(inp(0x3DA) & 0x08));
+
+    outp(0x3C8, 0);  /* Start at color 0 */
+
+    /* Colors 0-15: Keep standard but darker */
+    /* 0: Black */
+    outp(0x3C9, 0); outp(0x3C9, 0); outp(0x3C9, 0);
+    /* 1: Dark blue */
+    outp(0x3C9, 0); outp(0x3C9, 0); outp(0x3C9, 20);
+    /* 2: Dark green */
+    outp(0x3C9, 0); outp(0x3C9, 20); outp(0x3C9, 0);
+    /* 3: Dark cyan */
+    outp(0x3C9, 0); outp(0x3C9, 20); outp(0x3C9, 20);
+    /* 4: Dark red */
+    outp(0x3C9, 25); outp(0x3C9, 0); outp(0x3C9, 0);
+    /* 5: Dark magenta */
+    outp(0x3C9, 20); outp(0x3C9, 0); outp(0x3C9, 20);
+    /* 6: Brown */
+    outp(0x3C9, 30); outp(0x3C9, 18); outp(0x3C9, 8);
+    /* 7: Light gray */
+    outp(0x3C9, 40); outp(0x3C9, 40); outp(0x3C9, 40);
+    /* 8: Dark gray */
+    outp(0x3C9, 20); outp(0x3C9, 20); outp(0x3C9, 20);
+    /* 9: Light blue */
+    outp(0x3C9, 20); outp(0x3C9, 20); outp(0x3C9, 50);
+    /* 10: Light green */
+    outp(0x3C9, 20); outp(0x3C9, 50); outp(0x3C9, 20);
+    /* 11: Light cyan */
+    outp(0x3C9, 20); outp(0x3C9, 50); outp(0x3C9, 50);
+    /* 12: Light red */
+    outp(0x3C9, 50); outp(0x3C9, 20); outp(0x3C9, 20);
+    /* 13: Light magenta */
+    outp(0x3C9, 50); outp(0x3C9, 20); outp(0x3C9, 50);
+    /* 14: Yellow */
+    outp(0x3C9, 55); outp(0x3C9, 55); outp(0x3C9, 20);
+    /* 15: White */
+    outp(0x3C9, 63); outp(0x3C9, 63); outp(0x3C9, 63);
+
+    /* Colors 16-31: Gray stone ramp (dark to light) */
+    for (i = 0; i < 16; i++) {
+        int gray = 4 + i * 3;  /* 4 to 49 */
+        outp(0x3C9, gray);
+        outp(0x3C9, gray);
+        outp(0x3C9, gray);
+    }
+
+    /* Colors 32-47: Brown/tan brick ramp */
+    for (i = 0; i < 16; i++) {
+        int r = 12 + i * 3;    /* 12 to 57 */
+        int g = 6 + i * 2;     /* 6 to 36 */
+        int b = 4 + i;         /* 4 to 19 */
+        outp(0x3C9, r);
+        outp(0x3C9, g);
+        outp(0x3C9, b);
+    }
+
+    /* Colors 48-63: Red/flesh tones for enemies */
+    for (i = 0; i < 16; i++) {
+        int r = 16 + i * 3;
+        int g = 8 + i * 2;
+        int b = 4 + i;
+        outp(0x3C9, r);
+        outp(0x3C9, g);
+        outp(0x3C9, b);
+    }
+
+    /* Colors 64-79: Green tones for creepers */
+    for (i = 0; i < 16; i++) {
+        int r = 4 + i;
+        int g = 16 + i * 3;
+        int b = 4 + i;
+        outp(0x3C9, r);
+        outp(0x3C9, g);
+        outp(0x3C9, b);
+    }
+
+    /* Colors 80-95: Purple tones for magic/special */
+    for (i = 0; i < 16; i++) {
+        int r = 12 + i * 2;
+        int g = 4 + i;
+        int b = 20 + i * 2;
+        outp(0x3C9, r);
+        outp(0x3C9, g);
+        outp(0x3C9, b);
+    }
+
+    /* Fill remaining colors 96-255 with neutral grays for sprites */
+    for (i = 96; i < 256; i++) {
+        int gray = (i - 96) * 63 / 160;
+        outp(0x3C9, gray);
+        outp(0x3C9, gray);
+        outp(0x3C9, gray);
+    }
 }
 
 void setPixel(int x, int y, unsigned char color) {
@@ -513,6 +872,7 @@ void updateProjectiles(void) {
             double dy = newY - player.y;
             if (dx*dx + dy*dy < 0.25) {  /* Hit radius 0.5 */
                 player.health -= 10;
+                soundPlayerHurt();  /* [SEC-08] Sound effect */
                 projectiles[i].active = 0;
                 continue;
             }
@@ -527,11 +887,14 @@ void updateProjectiles(void) {
                 double dy = newY - enemies[j].y;
                 if (dx*dx + dy*dy < 0.36) {  /* Hit radius 0.6 */
                     enemies[j].health -= 25;
+                    soundHit();  /* [SEC-08] Sound effect */
                     projectiles[i].active = 0;
 
                     if (enemies[j].health <= 0) {
                         enemies[j].active = 0;
+                        enemies[j].deathTime = clock();  /* Record death time for respawn */
                         player.score += (enemies[j].type + 1) * 100;
+                        soundEnemyDeath();  /* [SEC-08] Sound effect */
                     }
                     break;
                 }
@@ -564,59 +927,139 @@ void initEnemies(void) {
     enemies[numEnemies].x = enemies[numEnemies].spawnX = 5.5;
     enemies[numEnemies].y = enemies[numEnemies].spawnY = 5.5;
     enemies[numEnemies].active = 1;
-    enemies[numEnemies].health = 50;
+    enemies[numEnemies].health = enemies[numEnemies].maxHealth = 50;
     enemies[numEnemies].type = ENEMY_GRUNT;
     enemies[numEnemies].canShoot = 0;
     enemies[numEnemies].lastFireTime = 0;
+    enemies[numEnemies].deathTime = 0;
     numEnemies++;
 
     /* Soldiers - they shoot! */
     enemies[numEnemies].x = enemies[numEnemies].spawnX = 18.5;
     enemies[numEnemies].y = enemies[numEnemies].spawnY = 5.5;
     enemies[numEnemies].active = 1;
-    enemies[numEnemies].health = 75;
+    enemies[numEnemies].health = enemies[numEnemies].maxHealth = 75;
     enemies[numEnemies].type = ENEMY_SOLDIER;
     enemies[numEnemies].canShoot = 1;
     enemies[numEnemies].lastFireTime = 0;
+    enemies[numEnemies].deathTime = 0;
     numEnemies++;
 
     enemies[numEnemies].x = enemies[numEnemies].spawnX = 10.5;
     enemies[numEnemies].y = enemies[numEnemies].spawnY = 12.5;
     enemies[numEnemies].active = 1;
-    enemies[numEnemies].health = 75;
+    enemies[numEnemies].health = enemies[numEnemies].maxHealth = 75;
     enemies[numEnemies].type = ENEMY_SOLDIER;
     enemies[numEnemies].canShoot = 1;
     enemies[numEnemies].lastFireTime = 0;
+    enemies[numEnemies].deathTime = 0;
     numEnemies++;
 
     /* Elite - shoots faster */
     enemies[numEnemies].x = enemies[numEnemies].spawnX = 18.5;
     enemies[numEnemies].y = enemies[numEnemies].spawnY = 18.5;
     enemies[numEnemies].active = 1;
-    enemies[numEnemies].health = 150;
+    enemies[numEnemies].health = enemies[numEnemies].maxHealth = 150;
     enemies[numEnemies].type = ENEMY_ELITE;
     enemies[numEnemies].canShoot = 1;
     enemies[numEnemies].lastFireTime = 0;
+    enemies[numEnemies].deathTime = 0;
     numEnemies++;
 
     /* More grunts */
     enemies[numEnemies].x = enemies[numEnemies].spawnX = 3.5;
     enemies[numEnemies].y = enemies[numEnemies].spawnY = 15.5;
     enemies[numEnemies].active = 1;
-    enemies[numEnemies].health = 50;
+    enemies[numEnemies].health = enemies[numEnemies].maxHealth = 50;
     enemies[numEnemies].type = ENEMY_GRUNT;
     enemies[numEnemies].canShoot = 0;
     enemies[numEnemies].lastFireTime = 0;
+    enemies[numEnemies].deathTime = 0;
     numEnemies++;
 
     enemies[numEnemies].x = enemies[numEnemies].spawnX = 20.5;
     enemies[numEnemies].y = enemies[numEnemies].spawnY = 11.5;
     enemies[numEnemies].active = 1;
-    enemies[numEnemies].health = 50;
+    enemies[numEnemies].health = enemies[numEnemies].maxHealth = 50;
     enemies[numEnemies].type = ENEMY_GRUNT;
     enemies[numEnemies].canShoot = 0;
     enemies[numEnemies].lastFireTime = 0;
+    enemies[numEnemies].deathTime = 0;
     numEnemies++;
+}
+
+/* Initialize torches at wall corners/edges */
+void initTorches(void) {
+    numTorches = 0;
+
+    /* Dungeon entrance - against left wall (x=0) */
+    torches[numTorches].x = 0.15; torches[numTorches].y = 1.5;
+    torches[numTorches].active = 1; torches[numTorches].intensity = 1.0; numTorches++;
+    /* Against wall at x=5 */
+    torches[numTorches].x = 4.85; torches[numTorches].y = 1.5;
+    torches[numTorches].active = 1; torches[numTorches].intensity = 1.0; numTorches++;
+
+    /* Corner at row 4 wall */
+    torches[numTorches].x = 3.15; torches[numTorches].y = 3.85;
+    torches[numTorches].active = 1; torches[numTorches].intensity = 0.9; numTorches++;
+
+    /* Corridor - against left wall */
+    torches[numTorches].x = 0.15; torches[numTorches].y = 5.5;
+    torches[numTorches].active = 1; torches[numTorches].intensity = 1.0; numTorches++;
+
+    /* Central hub - on pillars */
+    torches[numTorches].x = 2.15; torches[numTorches].y = 8.5;
+    torches[numTorches].active = 1; torches[numTorches].intensity = 1.2; numTorches++;
+    torches[numTorches].x = 6.15; torches[numTorches].y = 8.5;
+    torches[numTorches].active = 1; torches[numTorches].intensity = 1.1; numTorches++;
+    torches[numTorches].x = 8.15; torches[numTorches].y = 9.5;
+    torches[numTorches].active = 1; torches[numTorches].intensity = 1.1; numTorches++;
+
+    /* Stone area - on walls */
+    torches[numTorches].x = 11.15; torches[numTorches].y = 6.5;
+    torches[numTorches].active = 1; torches[numTorches].intensity = 1.0; numTorches++;
+    torches[numTorches].x = 15.15; torches[numTorches].y = 6.5;
+    torches[numTorches].active = 1; torches[numTorches].intensity = 1.0; numTorches++;
+
+    /* Prison area - on walls */
+    torches[numTorches].x = 0.15; torches[numTorches].y = 13.5;
+    torches[numTorches].active = 1; torches[numTorches].intensity = 0.8; numTorches++;
+    torches[numTorches].x = 4.15; torches[numTorches].y = 13.85;
+    torches[numTorches].active = 1; torches[numTorches].intensity = 0.8; numTorches++;
+
+    /* Tech/green area */
+    torches[numTorches].x = 17.15; torches[numTorches].y = 5.5;
+    torches[numTorches].active = 1; torches[numTorches].intensity = 1.3; numTorches++;
+    torches[numTorches].x = 19.85; torches[numTorches].y = 9.5;
+    torches[numTorches].active = 1; torches[numTorches].intensity = 1.2; numTorches++;
+
+    /* Exit area */
+    torches[numTorches].x = 21.15; torches[numTorches].y = 21.5;
+    torches[numTorches].active = 1; torches[numTorches].intensity = 1.5; numTorches++;
+}
+
+/* Calculate light level at a position based on torches */
+double getTorchLight(double x, double y) {
+    double totalLight = 0.7;  /* Base ambient light - good visibility */
+    int i;
+
+    for (i = 0; i < numTorches; i++) {
+        if (!torches[i].active) continue;
+
+        double dx = x - torches[i].x;
+        double dy = y - torches[i].y;
+        double dist = sqrt(dx*dx + dy*dy);
+
+        if (dist < TORCH_LIGHT_RADIUS) {
+            /* Inverse square falloff with torch intensity */
+            double falloff = 1.0 - (dist / TORCH_LIGHT_RADIUS);
+            totalLight += falloff * falloff * torches[i].intensity;
+        }
+    }
+
+    /* Clamp to 0.0 - 1.5 range */
+    if (totalLight > 1.5) totalLight = 1.5;
+    return totalLight;
 }
 
 /* Check line of sight from enemy to player */
@@ -650,6 +1093,21 @@ int enemyCanSeePlayer(int enemyIdx) {
 void updateEnemyAI(void) {
     clock_t now = clock();
     int i;
+
+    /* Check for enemy respawns */
+    for (i = 0; i < numEnemies; i++) {
+        if (!enemies[i].active && enemies[i].deathTime > 0) {
+            long elapsed = (now - enemies[i].deathTime) * 1000 / CLOCKS_PER_SEC;
+            if (elapsed > ENEMY_RESPAWN_TIME) {
+                /* Respawn the enemy at spawn point */
+                enemies[i].x = enemies[i].spawnX;
+                enemies[i].y = enemies[i].spawnY;
+                enemies[i].health = enemies[i].maxHealth;
+                enemies[i].active = 1;
+                enemies[i].deathTime = 0;
+            }
+        }
+    }
 
     for (i = 0; i < numEnemies; i++) {
         if (!enemies[i].active) continue;
@@ -700,8 +1158,8 @@ void updateEnemyAI(void) {
  *===========================================================================*/
 
 void initPlayer(void) {
-    player.x = 2.0;
-    player.y = 2.0;
+    player.x = 1.5;  /* Start in entrance corridor */
+    player.y = 1.5;
     player.angle = 0.0;
     player.dirX = 1.0;
     player.dirY = 0.0;
@@ -715,25 +1173,33 @@ void initPlayer(void) {
 void movePlayer(double moveDir) {
     double newX = player.x + player.dirX * moveDir * MOVE_SPEED;
     double newY = player.y + player.dirY * moveDir * MOVE_SPEED;
+    int moved = 0;
 
     if (worldMap[(int)player.y][(int)newX] == 0) {
         player.x = newX;
+        moved = 1;
     }
     if (worldMap[(int)newY][(int)player.x] == 0) {
         player.y = newY;
+        moved = 1;
     }
+    if (moved) soundStep();
 }
 
 void strafePlayer(double strafeDir) {
     double newX = player.x + player.planeX * strafeDir * MOVE_SPEED;
     double newY = player.y + player.planeY * strafeDir * MOVE_SPEED;
+    int moved = 0;
 
     if (worldMap[(int)player.y][(int)newX] == 0) {
         player.x = newX;
+        moved = 1;
     }
     if (worldMap[(int)newY][(int)player.x] == 0) {
         player.y = newY;
+        moved = 1;
     }
+    if (moved) soundStep();
 }
 
 void rotatePlayer(double angle) {
@@ -753,6 +1219,7 @@ void playerShoot(void) {
     if (player.ammo > 0) {
         fireProjectile(player.x, player.y, player.dirX, player.dirY, 1);
         player.ammo--;
+        soundShoot();  /* [SEC-08] Sound effect */
     }
 }
 
@@ -763,21 +1230,83 @@ void playerShoot(void) {
 void renderFrame(void) {
     int x, y;
 
-    /* Draw ceiling (dark gray gradient) */
-    for (y = 0; y < SCREEN_CENTER + playerPitch; y++) {
-        int shade = y * 8 / SCREEN_CENTER;
-        unsigned char color = (shade < 8) ? shade : 8;
-        for (x = 0; x < SCREEN_WIDTH; x++) {
-            backBuffer[y * SCREEN_WIDTH + x] = color;
+    /* Draw ceiling - night sky with stars */
+    {
+        int horizonY = SCREEN_CENTER + playerPitch;
+        for (y = 0; y < horizonY; y++) {
+            int distFromHorizon = horizonY - y;
+            for (x = 0; x < SCREEN_WIDTH; x++) {
+                unsigned char color;
+                /* Dark sky gradient - black at top, dark gray at horizon */
+                if (distFromHorizon < 15) {
+                    color = 8;  /* Dark gray near horizon */
+                } else {
+                    color = 0;  /* Black sky */
+                }
+                backBuffer[y * SCREEN_WIDTH + x] = color;
+            }
+        }
+
+        /* Add stars to sky - shift with player angle for parallax */
+        {
+            int i, sx, sy;
+            int starOffset = (int)(player.angle * 80);
+            for (i = 0; i < 60; i++) {
+                /* Deterministic star positions */
+                sx = ((i * 97 + 13 + starOffset) % SCREEN_WIDTH);
+                if (sx < 0) sx += SCREEN_WIDTH;
+                sy = ((i * 43 + 7) % 70) + 5;  /* Upper part of sky */
+                if (sy < horizonY - 15) {
+                    unsigned char starColor = (i % 5 == 0) ? 15 : 7;  /* Bright or dim white */
+                    backBuffer[sy * SCREEN_WIDTH + sx] = starColor;
+                }
+            }
         }
     }
 
-    /* Draw floor (brown gradient) */
+    /* Draw floor - red/brown stone tiles locked to world position */
+    /* Floor moves with pitch to match walls */
     for (y = SCREEN_CENTER + playerPitch; y < SCREEN_HEIGHT; y++) {
-        int shade = (SCREEN_HEIGHT - y) * 6 / SCREEN_CENTER;
-        unsigned char color = 6;  /* Brown base */
-        if (shade > 0) color = COLOR_BROWN;
+        int distFromHorizon = y - (SCREEN_CENTER + playerPitch);
+        /* Calculate distance - use screen-relative position for correct perspective */
+        double rowDist = (double)(SCREEN_HEIGHT / 2) / (y - (SCREEN_CENTER + playerPitch) + 0.1);
+
         for (x = 0; x < SCREEN_WIDTH; x++) {
+            unsigned char color;
+            /* Calculate world floor position for this pixel */
+            double floorX = player.x + rowDist * (player.dirX + player.planeX * (2.0 * x / SCREEN_WIDTH - 1));
+            double floorY = player.y + rowDist * (player.dirY + player.planeY * (2.0 * x / SCREEN_WIDTH - 1));
+
+            /* Tile coordinates in world space */
+            int tileX = (int)(floorX * 4) & 7;  /* 4 tiles per unit, wrap at 8 */
+            int tileY = (int)(floorY * 4) & 7;
+            int cellX = (int)(floorX * 4);
+            int cellY = (int)(floorY * 4);
+
+            /* Grout lines at tile edges */
+            int isGrout = (tileX == 0 || tileY == 0);
+
+            /* Checkerboard pattern */
+            int checker = (cellX + cellY) & 1;
+
+            if (distFromHorizon < 8) {
+                color = 0;  /* Black at horizon for depth fade */
+            } else if (isGrout) {
+                color = 0;  /* Black grout */
+            } else if (checker) {
+                color = 4;  /* Dark red tile */
+            } else {
+                color = 6;  /* Brown/orange tile */
+            }
+
+            /* Distance fade - darken far tiles */
+            if (rowDist > 6.0 && color != 0) {
+                color = 4;  /* Fade to dark red */
+            }
+            if (rowDist > 10.0 && color != 0) {
+                color = 0;  /* Fade to black */
+            }
+
             backBuffer[y * SCREEN_WIDTH + x] = color;
         }
     }
@@ -863,24 +1392,94 @@ void renderFrame(void) {
         double step = (double)TEX_SIZE / lineHeight;
         double texPos = (drawStart - SCREEN_CENTER - playerPitch + lineHeight / 2) * step;
 
+        /* Get torch light at wall position */
+        double torchLight = getTorchLight((double)mapX + 0.5, (double)mapY + 0.5);
+
+        /* Check for wall decorations (paintings and TVs) */
+        /* Hash wall position for pseudo-random decoration placement */
+        int decorHash = (mapX * 7 + mapY * 13) % 17;
+        int hasDecor = (decorHash < 5);  /* ~30% of walls have decorations */
+        int decorType = decorHash % 3;   /* 0=painting, 1=TV, 2=painting */
+
         for (y = drawStart; y < drawEnd; y++) {
             int texY = ((int)texPos) & TEX_MASK;
             texPos += step;
 
             unsigned char color = wallTextures[wallType][texY * TEX_SIZE + texX];
 
-            /* Distance fog */
-            if (perpWallDist > 12.0) {
-                color = COLOR_BLACK;
-            } else if (perpWallDist > 8.0) {
-                /* Darken */
-                if (color > 8) color -= 8;
-                else color = 0;
-            }
+            /* Check if we're in decoration area (middle of wall texture) */
+            int inDecorX = (texX >= 8 && texX < 56);
+            int inDecorY = (texY >= 12 && texY < 52);
 
-            /* Side shading */
-            if (side == 1) {
-                if (color > 0) color = (color > 8) ? color - 4 : color / 2;
+            if (hasDecor && inDecorX && inDecorY && perpWallDist < 6.0) {
+                /* Draw decoration */
+                int decorX = texX - 8;
+                int decorY = texY - 12;
+                int decorW = 48;
+                int decorH = 40;
+
+                /* Frame border */
+                if (decorX < 3 || decorX >= decorW - 3 ||
+                    decorY < 3 || decorY >= decorH - 3) {
+                    if (decorType == 1) {
+                        color = 8;  /* Gray frame for TV */
+                    } else {
+                        color = 6;  /* Brown frame for painting */
+                    }
+                } else if (decorType == 1) {
+                    /* Broken TV - black with static/cracks */
+                    int crackHash = (decorX * 3 + decorY * 7 + mapX + mapY) % 13;
+                    if (crackHash == 0 || crackHash == 5) {
+                        color = 7;  /* Gray crack lines */
+                    } else if (crackHash == 1) {
+                        color = 8;  /* Lighter static */
+                    } else {
+                        color = 0;  /* Black screen */
+                    }
+                } else {
+                    /* Painting - abstract art */
+                    int artHash = (decorX / 6 + decorY / 5 + mapX * 3 + mapY * 5) % 8;
+                    switch (artHash) {
+                        case 0: color = 4; break;   /* Red */
+                        case 1: color = 1; break;   /* Blue */
+                        case 2: color = 2; break;   /* Green */
+                        case 3: color = 14; break;  /* Yellow */
+                        case 4: color = 5; break;   /* Magenta */
+                        case 5: color = 3; break;   /* Cyan */
+                        case 6: color = 6; break;   /* Brown */
+                        default: color = 7; break;  /* Gray */
+                    }
+                }
+            } else {
+                /* Normal wall texture with lighting */
+                /* Base dimming - start darker so torches show up */
+                int brightness = color;
+                if (brightness >= 16 && brightness <= 31) {
+                    brightness -= 4;  /* Make base darker */
+                    if (brightness < 16) brightness = 16;
+                }
+
+                /* Apply torch lighting - brighten near torches */
+                if (torchLight > 0.3) {
+                    int boost = (int)((torchLight - 0.3) * 10);
+                    brightness += boost;
+                    if (brightness > 31) brightness = 31;
+                }
+
+                /* Distance darkening */
+                if (perpWallDist > 8.0) {
+                    int darken = (int)((perpWallDist - 8.0) * 2);
+                    brightness -= darken;
+                    if (brightness < 16) brightness = 16;
+                }
+
+                /* Side shading - darken one side */
+                if (side == 1) {
+                    brightness -= 2;
+                    if (brightness < 16) brightness = 16;
+                }
+
+                color = brightness;
             }
 
             backBuffer[y * SCREEN_WIDTH + x] = color;
@@ -894,8 +1493,10 @@ void renderFrame(void) {
 
 void renderSprites(void) {
     int i, x, y;
+    unsigned char *sprite;
+    int sprWidth, sprHeight;
 
-    /* Render enemies */
+    /* Render enemies using bitmap sprites */
     for (i = 0; i < numEnemies; i++) {
         if (!enemies[i].active) continue;
 
@@ -910,62 +1511,54 @@ void renderSprites(void) {
 
         int spriteScreenX = (int)((SCREEN_WIDTH / 2) * (1 + transformX / transformY));
         int spriteHeight = abs((int)(SCREEN_HEIGHT / transformY));
-        int spriteWidth = spriteHeight;
+        int spriteWidth = spriteHeight * ENEMY_SPRITE_WIDTH / ENEMY_SPRITE_HEIGHT;
+
+        /* Skip if sprite too small or too big */
+        if (spriteWidth < 2 || spriteHeight < 2) continue;
+        if (spriteWidth > SCREEN_WIDTH * 2) continue;
 
         int drawStartY = -spriteHeight / 2 + SCREEN_CENTER + playerPitch;
         int drawEndY = spriteHeight / 2 + SCREEN_CENTER + playerPitch;
         int drawStartX = -spriteWidth / 2 + spriteScreenX;
         int drawEndX = spriteWidth / 2 + spriteScreenX;
 
+        /* Clip to screen */
+        if (drawEndX < 0 || drawStartX >= SCREEN_WIDTH) continue;
+        if (drawEndY < 0 || drawStartY >= SCREEN_HEIGHT) continue;
+
         if (drawStartY < 0) drawStartY = 0;
         if (drawEndY >= SCREEN_HEIGHT) drawEndY = SCREEN_HEIGHT - 1;
         if (drawStartX < 0) drawStartX = 0;
         if (drawEndX >= SCREEN_WIDTH) drawEndX = SCREEN_WIDTH - 1;
 
-        /* Enemy color based on type */
-        unsigned char enemyColor;
+        /* Select sprite based on enemy type - using 64x64 sprites */
         switch (enemies[i].type) {
-            case ENEMY_GRUNT: enemyColor = COLOR_GREEN; break;
-            case ENEMY_SOLDIER: enemyColor = COLOR_RED; break;
-            case ENEMY_ELITE: enemyColor = COLOR_MAGENTA; break;
-            case ENEMY_BOSS: enemyColor = COLOR_YELLOW; break;
-            default: enemyColor = COLOR_WHITE; break;
+            case ENEMY_GRUNT: sprite = (unsigned char *)sprite_minion; break;
+            case ENEMY_SOLDIER: sprite = (unsigned char *)sprite_minion; break;
+            case ENEMY_ELITE: sprite = (unsigned char *)sprite_creeper; break;
+            case ENEMY_BOSS: sprite = (unsigned char *)sprite_snowman; break;
+            default: sprite = (unsigned char *)sprite_minion; break;
         }
+        sprWidth = 64;
+        sprHeight = 64;
 
-        /* Draw simple sprite (will be replaced with bitmap later) */
+        /* Draw scaled bitmap sprite with z-buffer test */
         for (x = drawStartX; x < drawEndX; x++) {
-            if (transformY < zBuffer[x]) {
-                for (y = drawStartY; y < drawEndY; y++) {
-                    /* Simple humanoid shape */
-                    int localX = x - drawStartX;
-                    int localY = y - drawStartY;
-                    int centerX = spriteWidth / 2;
-                    int centerY = spriteHeight / 2;
+            /* Z-buffer: only draw if sprite is closer than wall */
+            if (transformY >= zBuffer[x]) continue;
 
-                    /* Head (top 1/4) */
-                    if (localY < spriteHeight / 4) {
-                        int headCenterX = centerX;
-                        int headCenterY = spriteHeight / 8;
-                        int headRadius = spriteHeight / 8;
-                        int dx = localX - headCenterX;
-                        int dy = localY - headCenterY;
-                        if (dx*dx + dy*dy < headRadius*headRadius) {
-                            backBuffer[y * SCREEN_WIDTH + x] = enemyColor;
-                        }
-                    }
-                    /* Body (middle 1/2) */
-                    else if (localY < spriteHeight * 3 / 4) {
-                        if (localX > centerX - spriteWidth/6 && localX < centerX + spriteWidth/6) {
-                            backBuffer[y * SCREEN_WIDTH + x] = enemyColor;
-                        }
-                    }
-                    /* Legs (bottom 1/4) */
-                    else {
-                        if ((localX > centerX - spriteWidth/4 && localX < centerX - spriteWidth/12) ||
-                            (localX > centerX + spriteWidth/12 && localX < centerX + spriteWidth/4)) {
-                            backBuffer[y * SCREEN_WIDTH + x] = enemyColor;
-                        }
-                    }
+            int texX = ((x - (-spriteWidth / 2 + spriteScreenX)) * sprWidth) / spriteWidth;
+            if (texX < 0) texX = 0;
+            if (texX >= sprWidth) texX = sprWidth - 1;
+
+            for (y = drawStartY; y < drawEndY; y++) {
+                int texY = ((y - (-spriteHeight / 2 + SCREEN_CENTER + playerPitch)) * sprHeight) / spriteHeight;
+                if (texY < 0) texY = 0;
+                if (texY >= sprHeight) texY = sprHeight - 1;
+
+                unsigned char pixel = sprite[texY * sprWidth + texX];
+                if (pixel != 255 && pixel != 0) {  /* 255 or 0 = transparent */
+                    backBuffer[y * SCREEN_WIDTH + x] = pixel;
                 }
             }
         }
@@ -1003,6 +1596,96 @@ void renderSprites(void) {
                         if (px*px + py*py <= size*size) {
                             backBuffer[drawY * SCREEN_WIDTH + drawX] = projectiles[i].color;
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    /* Render torches with animated flames */
+    {
+        static int flameFrame = 0;
+        flameFrame++;
+
+        for (i = 0; i < numTorches; i++) {
+            if (!torches[i].active) continue;
+
+            double spriteX = torches[i].x - player.x;
+            double spriteY = torches[i].y - player.y;
+
+            double invDet = 1.0 / (player.planeX * player.dirY - player.dirX * player.planeY);
+            double transformX = invDet * (player.dirY * spriteX - player.dirX * spriteY);
+            double transformY = invDet * (-player.planeY * spriteX + player.planeX * spriteY);
+
+            if (transformY <= 0.2) continue;  /* Behind player */
+
+            int spriteScreenX = (int)((SCREEN_WIDTH / 2) * (1 + transformX / transformY));
+
+            /* Torch size based on distance */
+            int torchHeight = (int)(48 / transformY);
+            int torchWidth = (int)(16 / transformY);
+            if (torchHeight < 4) continue;
+            if (torchHeight > 200) torchHeight = 200;
+            if (torchWidth < 2) torchWidth = 2;
+            if (torchWidth > 60) torchWidth = 60;
+
+            /* Position - mount on wall, slightly above center */
+            int drawStartY = SCREEN_CENTER + playerPitch - torchHeight;
+            int drawEndY = SCREEN_CENTER + playerPitch;
+            int drawStartX = spriteScreenX - torchWidth / 2;
+            int drawEndX = spriteScreenX + torchWidth / 2;
+
+            /* Clip to screen */
+            if (drawEndX < 0 || drawStartX >= SCREEN_WIDTH) continue;
+            if (drawStartY < 0) drawStartY = 0;
+            if (drawEndY >= SCREEN_HEIGHT) drawEndY = SCREEN_HEIGHT - 1;
+            if (drawStartX < 0) drawStartX = 0;
+            if (drawEndX >= SCREEN_WIDTH) drawEndX = SCREEN_WIDTH - 1;
+
+            /* Draw torch with animated flame */
+            for (x = drawStartX; x < drawEndX; x++) {
+                /* Z-buffer check */
+                if (transformY >= zBuffer[x]) continue;
+
+                for (y = drawStartY; y < drawEndY; y++) {
+                    int relY = y - drawStartY;
+                    int relX = x - spriteScreenX;
+                    int flameHeight = torchHeight * 2 / 3;  /* Top 2/3 is flame */
+                    int handleHeight = torchHeight - flameHeight;
+
+                    unsigned char color = 0;
+
+                    if (relY >= flameHeight) {
+                        /* Handle/bracket part - brown/gray */
+                        if (relX >= -torchWidth/4 && relX <= torchWidth/4) {
+                            color = 6;  /* Brown handle */
+                        }
+                    } else {
+                        /* Flame part - animated orange/yellow/red */
+                        int flameCenter = torchWidth / 2;
+                        int distFromCenter = (relX < 0) ? -relX : relX;
+
+                        /* Flame narrows toward top */
+                        int maxWidth = (torchWidth / 2) * (flameHeight - relY) / flameHeight;
+
+                        if (distFromCenter <= maxWidth) {
+                            /* Animate flame colors */
+                            int flicker = ((flameFrame + relY * 3 + x * 7) / 4) % 4;
+                            if (relY < flameHeight / 4) {
+                                /* Top of flame - yellow */
+                                color = (flicker == 0) ? 14 : 44;  /* Yellow/bright yellow */
+                            } else if (relY < flameHeight / 2) {
+                                /* Middle - orange */
+                                color = (flicker < 2) ? 44 : 6;  /* Orange/brown */
+                            } else {
+                                /* Base - red/orange */
+                                color = (flicker == 0) ? 4 : 6;  /* Red/brown */
+                            }
+                        }
+                    }
+
+                    if (color != 0) {
+                        backBuffer[y * SCREEN_WIDTH + x] = color;
                     }
                 }
             }
@@ -1130,38 +1813,182 @@ void drawText(int x, int y, const char *text, unsigned char color) {
     }
 }
 
-void drawHUD(void) {
-    char buffer[32];
-    int i, j;
-    unsigned char color;
+/* Draw mini map in corner */
+void drawMiniMap(int mapX, int mapY, int mapSize) {
+    int x, y, px, py;
+    int cellSize = mapSize / MAP_WIDTH;
+    int i;
 
-    /* Health bar */
-    drawText(5, 5, "HEALTH:", COLOR_WHITE);
-    for (i = 0; i < 50; i++) {
-        color = (i < player.health / 2) ?
-            (player.health > 50 ? COLOR_LGREEN : (player.health > 25 ? COLOR_YELLOW : COLOR_LRED))
-            : COLOR_GRAY;
-        for (j = 0; j < 4; j++) {
-            setPixel(60 + i, 5 + j, color);
+    /* Draw map background */
+    for (y = 0; y < mapSize; y++) {
+        for (x = 0; x < mapSize; x++) {
+            setPixel(mapX + x, mapY + y, COLOR_BLACK);
         }
     }
 
-    /* Ammo */
-    sprintf(buffer, "AMMO: %d", player.ammo);
-    drawText(5, 15, buffer, COLOR_YELLOW);
+    /* Draw walls */
+    for (y = 0; y < MAP_HEIGHT; y++) {
+        for (x = 0; x < MAP_WIDTH; x++) {
+            if (worldMap[y][x] != 0) {
+                int sx = mapX + x * cellSize;
+                int sy = mapY + y * cellSize;
+                int i2, j;
+                for (i2 = 0; i2 < cellSize; i2++) {
+                    for (j = 0; j < cellSize; j++) {
+                        setPixel(sx + i2, sy + j, COLOR_GRAY);
+                    }
+                }
+            }
+        }
+    }
 
-    /* Score */
-    sprintf(buffer, "SCORE: %d", player.score);
-    drawText(5, 25, buffer, COLOR_LCYAN);
+    /* Draw EXIT marker at SE corner (blinking yellow) */
+    {
+        int exitX = mapX + 22 * cellSize;
+        int exitY = mapY + 22 * cellSize;
+        unsigned char exitColor = ((clock() / (CLOCKS_PER_SEC / 4)) % 2) ? COLOR_YELLOW : COLOR_BWHITE;
+        setPixel(exitX, exitY, exitColor);
+        setPixel(exitX+1, exitY, exitColor);
+        setPixel(exitX, exitY+1, exitColor);
+        setPixel(exitX+1, exitY+1, exitColor);
+    }
 
-    /* Crosshair */
-    int cx = SCREEN_WIDTH / 2;
-    int cy = SCREEN_CENTER + playerPitch;
-    setPixel(cx - 5, cy, COLOR_WHITE);
-    setPixel(cx + 5, cy, COLOR_WHITE);
-    setPixel(cx, cy - 5, COLOR_WHITE);
-    setPixel(cx, cy + 5, COLOR_WHITE);
-    setPixel(cx, cy, COLOR_LRED);
+    /* Draw enemies as red dots */
+    for (i = 0; i < numEnemies; i++) {
+        if (enemies[i].active) {
+            int ex = mapX + (int)(enemies[i].x * cellSize);
+            int ey = mapY + (int)(enemies[i].y * cellSize);
+            setPixel(ex, ey, COLOR_LRED);
+            setPixel(ex+1, ey, COLOR_LRED);
+            setPixel(ex, ey+1, COLOR_LRED);
+            setPixel(ex+1, ey+1, COLOR_LRED);
+        }
+    }
+
+    /* Draw player as green triangle */
+    px = mapX + (int)(player.x * cellSize);
+    py = mapY + (int)(player.y * cellSize);
+    setPixel(px, py, COLOR_LGREEN);
+    setPixel(px+1, py, COLOR_LGREEN);
+    setPixel(px-1, py, COLOR_LGREEN);
+    setPixel(px, py-1, COLOR_LGREEN);
+    setPixel(px, py+1, COLOR_LGREEN);
+
+    /* Draw view direction line */
+    {
+        int dx = (int)(player.dirX * 4);
+        int dy = (int)(player.dirY * 4);
+        setPixel(px + dx, py + dy, COLOR_YELLOW);
+        setPixel(px + dx/2, py + dy/2, COLOR_YELLOW);
+    }
+}
+
+/* Draw weapon sprite at bottom center */
+void drawWeapon(void) {
+    int startX = SCREEN_WIDTH / 2 - WEAPON_WIDTH / 2;
+    int startY = SCREEN_HEIGHT - WEAPON_HEIGHT - 32;  /* Above status bar */
+    int x, y;
+    unsigned char pixel;
+
+    for (y = 0; y < WEAPON_HEIGHT; y++) {
+        for (x = 0; x < WEAPON_WIDTH; x++) {
+            pixel = weaponSprite[y * WEAPON_WIDTH + x];
+            if (pixel != 0) {  /* 0 is transparent */
+                setPixel(startX + x, startY + y, pixel);
+            }
+        }
+    }
+}
+
+void drawHUD(void) {
+    char buffer[32];
+    int i, j;
+    int barY = SCREEN_HEIGHT - 32;  /* Status bar starts here */
+    unsigned char color;
+
+    /* Draw weapon first */
+    drawWeapon();
+
+    /*=====================================================================
+     * DOOM-STYLE STATUS BAR AT BOTTOM (widest at bottom)
+     *====================================================================*/
+
+    /* Draw status bar background - gradient from dark to darker */
+    for (j = 0; j < 32; j++) {
+        unsigned char bgColor = (j < 8) ? 8 : ((j < 16) ? 7 : 6);
+        for (i = 0; i < SCREEN_WIDTH; i++) {
+            setPixel(i, barY + j, bgColor);
+        }
+    }
+
+    /* Draw top border (bright line) */
+    for (i = 0; i < SCREEN_WIDTH; i++) {
+        setPixel(i, barY, COLOR_WHITE);
+        setPixel(i, barY + 1, COLOR_GRAY);
+    }
+
+    /* Left section: HEALTH */
+    drawText(8, barY + 6, "HEALTH", COLOR_RED);
+    sprintf(buffer, "%3d%%", player.health);
+    drawText(8, barY + 16, buffer, COLOR_LRED);
+
+    /* Health bar below text */
+    for (i = 0; i < 50; i++) {
+        color = (i < player.health / 2) ?
+            (player.health > 50 ? COLOR_LGREEN : (player.health > 25 ? COLOR_YELLOW : COLOR_LRED))
+            : COLOR_DGRAY;
+        for (j = 0; j < 4; j++) {
+            setPixel(56 + i, barY + 18 + j, color);
+        }
+    }
+
+    /* Center section: SCORE with border box */
+    {
+        int centerX = SCREEN_WIDTH / 2 - 32;
+        /* Draw inset box */
+        for (j = 4; j < 28; j++) {
+            for (i = 0; i < 64; i++) {
+                setPixel(centerX + i, barY + j, COLOR_DGRAY);
+            }
+        }
+        drawText(centerX + 8, barY + 8, "SCORE", COLOR_YELLOW);
+        sprintf(buffer, "%6d", player.score);
+        drawText(centerX + 8, barY + 18, buffer, COLOR_BWHITE);
+    }
+
+    /* Right section: AMMO */
+    {
+        int rightX = SCREEN_WIDTH - 80;
+        drawText(rightX, barY + 6, "AMMO", COLOR_CYAN);
+        sprintf(buffer, "%3d", player.ammo);
+        drawText(rightX, barY + 16, buffer, COLOR_LCYAN);
+
+        /* Ammo pips */
+        for (i = 0; i < (player.ammo > 20 ? 20 : player.ammo); i++) {
+            setPixel(rightX + 32 + (i % 10) * 3, barY + 16 + (i / 10) * 4, COLOR_YELLOW);
+            setPixel(rightX + 33 + (i % 10) * 3, barY + 16 + (i / 10) * 4, COLOR_YELLOW);
+        }
+    }
+
+    /* Draw mini map in top-right corner */
+    drawMiniMap(SCREEN_WIDTH - 52, 4, 48);
+
+    /* Crosshair in center of view */
+    {
+        int cx = SCREEN_WIDTH / 2;
+        int cy = SCREEN_CENTER + playerPitch;
+        /* Cross shape */
+        setPixel(cx - 4, cy, COLOR_WHITE);
+        setPixel(cx - 3, cy, COLOR_WHITE);
+        setPixel(cx + 3, cy, COLOR_WHITE);
+        setPixel(cx + 4, cy, COLOR_WHITE);
+        setPixel(cx, cy - 4, COLOR_WHITE);
+        setPixel(cx, cy - 3, COLOR_WHITE);
+        setPixel(cx, cy + 3, COLOR_WHITE);
+        setPixel(cx, cy + 4, COLOR_WHITE);
+        /* Center dot */
+        setPixel(cx, cy, COLOR_LRED);
+    }
 }
 
 /*============================================================================
@@ -1188,8 +2015,8 @@ void handleInput(void) {
     }
     if (my != 0) {
         playerPitch -= my;
-        if (playerPitch > 80) playerPitch = 80;
-        if (playerPitch < -80) playerPitch = -80;
+        if (playerPitch > 50) playerPitch = 50;
+        if (playerPitch < -50) playerPitch = -50;
     }
 
     /* Movement - WASD or arrows */
@@ -1210,67 +2037,135 @@ void handleInput(void) {
  * SPLASH SCREEN - VGA MODE ASCII ART
  *===========================================================================*/
 
+/* Star positions - pre-computed for animation */
+static int starX[150];
+static int starY[150];
+static int starSpeed[150];  /* 1=slow, 2=medium, 3=fast for parallax */
+static int starsInitialized = 0;
+
+/* Initialize star positions once */
+void initStars(void) {
+    int i;
+    srand(12345);
+    for (i = 0; i < 150; i++) {
+        starX[i] = rand() % SCREEN_WIDTH;
+        starY[i] = rand() % SCREEN_HEIGHT;
+        starSpeed[i] = 1 + (rand() % 3);  /* Speed 1-3 */
+    }
+    starsInitialized = 1;
+}
+
+/* Draw animated starfield background */
+void drawStarfield(int frame) {
+    int i, sx, sy;
+    unsigned char color;
+
+    if (!starsInitialized) {
+        initStars();
+    }
+
+    for (i = 0; i < 150; i++) {
+        /* Move stars horizontally based on speed (parallax) */
+        sx = (starX[i] - frame * starSpeed[i]) % SCREEN_WIDTH;
+        if (sx < 0) sx += SCREEN_WIDTH;
+        sy = starY[i];
+
+        /* Brighter stars move faster */
+        if (starSpeed[i] == 3) {
+            color = COLOR_BWHITE;  /* Bright white - fast */
+        } else if (starSpeed[i] == 2) {
+            color = COLOR_WHITE;   /* White - medium */
+        } else {
+            color = COLOR_GRAY;    /* Dim gray - slow */
+        }
+        setPixel(sx, sy, color);
+    }
+}
+
+/* Cascade letter animation for title */
+void drawCascadeTitle(const char *text, int startX, int startY, unsigned char color, int frame) {
+    int i, len;
+    len = strlen(text);
+    for (i = 0; i < len && i <= frame; i++) {
+        int dropY = startY;
+        int elapsed = frame - i;
+        if (elapsed < 10) {
+            dropY = -20 + (startY + 20) * elapsed / 10;  /* Drop from top */
+        }
+        drawChar(startX + i * 8, dropY, text[i], color);
+    }
+}
+
 void drawSplashScreen(void) {
-    int x, y, i, px, py;
+    int x, frame;
     int centerX = SCREEN_WIDTH / 2;
+    const char *title = "MAZE RUNNER 2";
+    int titleLen = 13;
+    int titleX = centerX - (titleLen * 8) / 2;
+    clock_t startTime = clock();
 
-    clearScreen(COLOR_BLACK);
+    /* Cascade animation for title */
+    for (frame = 0; frame < 30; frame++) {
+        clearScreen(COLOR_BLACK);
 
-    /* Draw cool border */
-    for (x = 0; x < SCREEN_WIDTH; x++) {
-        setPixel(x, 0, COLOR_LRED);
-        setPixel(x, 1, COLOR_RED);
-        setPixel(x, SCREEN_HEIGHT-2, COLOR_RED);
-        setPixel(x, SCREEN_HEIGHT-1, COLOR_LRED);
-    }
-    for (y = 0; y < SCREEN_HEIGHT; y++) {
-        setPixel(0, y, COLOR_LRED);
-        setPixel(1, y, COLOR_RED);
-        setPixel(SCREEN_WIDTH-2, y, COLOR_RED);
-        setPixel(SCREEN_WIDTH-1, y, COLOR_LRED);
-    }
+        /* Draw starfield background */
+        drawStarfield(frame);
 
-    /* MAZE RUNNER 2 title - big centered */
-    drawText(centerX - 56, 20, "MAZE RUNNER 2", COLOR_YELLOW);
+        /* Draw border */
+        for (x = 0; x < SCREEN_WIDTH; x++) {
+            setPixel(x, 0, COLOR_RED);
+            setPixel(x, SCREEN_HEIGHT-1, COLOR_RED);
+        }
 
-    /* Subtitle */
-    drawText(centerX - 64, 35, "THE NEXT LEVEL", COLOR_LRED);
+        /* Cascade title letters */
+        drawCascadeTitle(title, titleX, 30, COLOR_YELLOW, frame);
 
-    /* Cool divider line */
-    for (x = 40; x < SCREEN_WIDTH - 40; x++) {
-        setPixel(x, 48, COLOR_CYAN);
-        setPixel(x, 49, COLOR_LCYAN);
-    }
+        /* Subtitle appears after title */
+        if (frame > 15) {
+            drawText(centerX - 64, 50, "THE NEXT LEVEL", COLOR_LRED);
+        }
 
-    /* Features list */
-    drawText(60, 60, "64X64 TEXTURES", COLOR_LGREEN);
-    drawText(60, 75, "ENEMIES SHOOT BACK!", COLOR_LRED);
-    drawText(60, 90, "WASD + MOUSE", COLOR_LCYAN);
-    drawText(60, 105, "PROJECTILE COMBAT", COLOR_YELLOW);
+        displayFrame();
 
-    /* Draw some decorative pixels for cyberpunk feel */
-    for (i = 0; i < 50; i++) {
-        px = 20 + (rand() % 20);
-        py = 60 + (rand() % 60);
-        setPixel(px, py, COLOR_CYAN);
-        px = SCREEN_WIDTH - 20 - (rand() % 20);
-        setPixel(px, py, COLOR_CYAN);
+        /* Timing */
+        while ((clock() - startTime) * 1000 / CLOCKS_PER_SEC < frame * 80);
     }
 
-    /* Controls hint */
-    drawText(centerX - 72, 130, "WASD - MOVE", COLOR_WHITE);
-    drawText(centerX - 72, 142, "MOUSE - AIM", COLOR_WHITE);
-    drawText(centerX - 72, 154, "SPACE - FIRE", COLOR_WHITE);
+    /* Final splash with all content - animate until key press */
+    while (!kbhit()) {
+        clearScreen(COLOR_BLACK);
+        drawStarfield(frame++);
 
-    /* Bottom divider */
-    for (x = 40; x < SCREEN_WIDTH - 40; x++) {
-        setPixel(x, 170, COLOR_CYAN);
+        /* Border */
+        for (x = 0; x < SCREEN_WIDTH; x++) {
+            setPixel(x, 0, COLOR_RED);
+            setPixel(x, SCREEN_HEIGHT-1, COLOR_RED);
+        }
+
+        /* Title */
+        drawText(titleX, 30, title, COLOR_YELLOW);
+        drawText(centerX - 64, 50, "THE NEXT LEVEL", COLOR_LRED);
+
+        /* Features list */
+        drawText(60, 75, "STONE DUNGEONS", COLOR_LGREEN);
+        drawText(60, 90, "ENEMIES SHOOT BACK!", COLOR_LRED);
+        drawText(60, 105, "DYNAMIC LIGHTING", COLOR_YELLOW);
+        drawText(60, 120, "WASD + MOUSE", COLOR_LCYAN);
+
+        /* Controls */
+        drawText(centerX - 72, 145, "WASD - MOVE", COLOR_WHITE);
+        drawText(centerX - 72, 157, "MOUSE - AIM", COLOR_WHITE);
+        drawText(centerX - 72, 169, "SPACE - FIRE", COLOR_WHITE);
+
+        /* Press key */
+        drawText(centerX - 64, 188, "PRESS ANY KEY", COLOR_BWHITE);
+
+        displayFrame();
+
+        /* Small delay for animation */
+        while ((clock() - startTime) * 1000 / CLOCKS_PER_SEC < frame * 50);
     }
-
-    /* Press key prompt */
-    drawText(centerX - 80, 185, "PRESS ANY KEY", COLOR_BWHITE);
-
-    displayFrame();
+    getch();  /* Consume the key */
 }
 
 void drawCreditsScreen(void) {
@@ -1278,6 +2173,7 @@ void drawCreditsScreen(void) {
     int centerX = SCREEN_WIDTH / 2;
 
     clearScreen(COLOR_BLACK);
+    drawStarfield(0);
 
     /* Border */
     for (x = 0; x < SCREEN_WIDTH; x++) {
@@ -1426,13 +2322,28 @@ int main(void) {
     initDoubleBuffer();
     initFont();
     initTextures();
+    initEnemySprites();  /* [SEC-05] Procedural enemy sprites */
     initPlayer();
     initProjectiles();
     initEnemies();
+    initTorches();  /* [SEC-03] Dynamic lighting */
+    initSound();    /* [SEC-08] Sound Blaster/AdLib */
     initMouse();
 
     /* Enter VGA mode */
     setVideoMode(0x13);
+
+    /* Use default VGA 256-color palette - has full color range for sprites */
+    /* setupDungeonPalette(); - disabled, breaks sprite colors */
+
+    /* Initialize and start MIDI music */
+    InitMIDI();    /* CRITICAL: Must call this first to set up timer handler */
+    if (SetFM()) { /* Detect FM chip and load FM.DAT instruments */
+        if (LoadMIDI("1.MID")) {
+            SetVol(200);
+            PlayMIDI();
+        }
+    }
 
     /* Show credits splash */
     drawCreditsScreen();
@@ -1449,6 +2360,24 @@ int main(void) {
         handleInput();
         updateProjectiles();
         updateEnemyAI();
+
+        /* Check for exit - SE corner of map (around position 22,22) */
+        if (player.x > 21.5 && player.y > 21.5) {
+            /* Player reached the exit door! */
+            player.score += 1000;  /* Bonus for escaping */
+
+            /* Play victory fanfare */
+            soundPickup();
+            soundPickup();
+
+            /* Flash the screen and show "EXIT REACHED" message */
+            clearScreen(14);  /* Yellow flash */
+            drawText(100, 90, "EXIT REACHED!", 0);
+            displayFrame();
+            delay(1500);
+
+            break;
+        }
 
         renderFrame();
         renderSprites();
@@ -1478,6 +2407,10 @@ int main(void) {
     printf("  By VonHoltenCodes 2025\n");
     printf("  Thanks for playing!\n");
     printf("\n");
+
+    /* Stop MIDI music and restore timer */
+    StopMIDI();
+    UnloadMIDI();
 
     freeDoubleBuffer();
 
