@@ -1,0 +1,8 @@
+@ECHO OFF
+REM MAZE RUNNER 2 launcher - loads a mouse driver if one is around, then runs the game.
+REM MAZE2.EXE is self-contained (DPMI built in); FM.DAT and 1.MID must sit beside it.
+IF EXIST MOUSE.COM MOUSE.COM
+IF EXIST C:\WINDOWS\COMMAND\MOUSE.COM C:\WINDOWS\COMMAND\MOUSE.COM
+IF EXIST C:\DOS\MOUSE.COM C:\DOS\MOUSE.COM
+IF EXIST C:\MOUSE\MOUSE.COM C:\MOUSE\MOUSE.COM
+MAZE2.EXE %1

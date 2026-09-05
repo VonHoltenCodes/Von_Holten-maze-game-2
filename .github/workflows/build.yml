@@ -1,0 +1,49 @@
+name: Build MAZE RUNNER 2
+
+on:
+  push:
+    branches: [main, modernize]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  dos:
+    name: DOS executable (DJGPP)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install DJGPP cross-compiler + floppy tools
+        run: |
+          curl -sSL -o djgpp.tar.bz2 https://github.com/andrewwutw/build-djgpp/releases/download/v3.4/djgpp-linux64-gcc1220.tar.bz2
+          tar -xjf djgpp.tar.bz2 -C "$HOME"
+          echo "$HOME/djgpp/bin" >> "$GITHUB_PATH"
+          sudo apt-get update -qq && sudo apt-get install -y -qq mtools dosfstools zip
+      - name: Build
+        run: make dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MAZE2-dos
+          path: |
+            build/MAZE2.EXE
+            dist/MAZE2.IMG
+            dist/MAZE2.zip
+
+  release:
+    name: Attach binaries to release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [dos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: MAZE2-dos
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/build/MAZE2.EXE
+            dist/dist/MAZE2.IMG
+            dist/dist/MAZE2.zip

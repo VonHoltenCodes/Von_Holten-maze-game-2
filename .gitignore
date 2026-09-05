@@ -1,11 +1,10 @@
-# Build artifacts
+# Build outputs (CI attaches MAZE2.EXE / MAZE2.IMG / MAZE2.zip to releases)
+build/
+dist/
 *.o
 *.obj
-
-# Keep executables for easy distribution
-# *.EXE
-# *.exe
-
-# Floppy images
+*.EXE
+*.exe
 *.IMG
 *.img
+!dos/CWSDSTUB.EXE

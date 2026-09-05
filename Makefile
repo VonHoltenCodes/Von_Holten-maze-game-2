@@ -1,65 +1,51 @@
-#############################################################################
-# MAKEFILE - MAZE RUNNER 2 - P4 ERA DOS RAYCASTER
-#
-# Targeting Pentium 4 era hardware (1.5GHz+)
-# Sound Blaster/AdLib audio, 32x32 enemy sprites
-#
-# By: VonHoltenCodes (2025)
-#############################################################################
+# MAZE RUNNER 2 - DOS build (DJGPP cross-compiler)
+# Requires i586-pc-msdosdjgpp-gcc on PATH (~/djgpp/bin on devbase1), or set DJGPP_CC.
+#   make            -> build/MAZE2.EXE (self-contained: CWSDPMI stub bound in)
+#   make dist       -> dist/MAZE2.IMG (bootable-floppy-ready 1.44 MB image) + dist/MAZE2.zip
+#   make clean
+CC       = $(or $(DJGPP_CC),i586-pc-msdosdjgpp-gcc)
+CFLAGS  ?= -std=gnu99 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-implicit-int -Wno-empty-body \
+           -O2 -march=i586 -ffast-math -funroll-loops -Isrc -Ithird_party/midiplay
+LDFLAGS ?= -s
+BUILD   ?= build
+DIST    ?= dist
+VERSION ?= $(shell grep -m1 '^#define MAZE2_VERSION' src/maze2.c | cut -d'"' -f2)
 
-# DJGPP Cross-compiler
-CC = i586-pc-msdosdjgpp-gcc
+SRC     = src/maze2.c src/sound.c src/keyboard.c
+OBJ     = $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
+TARGET  = $(BUILD)/MAZE2.EXE
+DATA    = assets/music/1.MID assets/music/FM.DAT
+DOCS    = dos/README.TXT dos/MAZE2.BAT
 
-# Optimizations - compatible with Pentium and above
-CFLAGS = -Wall -O2 -march=i586 -ffast-math -funroll-loops -DMAZE_RUNNER_2 -I.
-
-LDFLAGS = -lm -s
-
-# Target executable
-TARGET = MAZE2.EXE
-
-# Source files - main game + audio modules
-SOURCES = maze2.c adlib.c sound.c
-
-# Object files
-OBJECTS = $(SOURCES:.c=.o)
-
-# Default target
 all: $(TARGET)
 
-$(TARGET): $(OBJECTS)
-	@echo ""
-	@echo "========================================="
-	@echo " LINKING MAZE RUNNER 2..."
-	@echo "========================================="
-	$(CC) $(OBJECTS) -o $(TARGET) $(LDFLAGS)
-	@echo ""
-	@echo "========================================="
-	@echo " MAZE RUNNER 2 - BUILD COMPLETE!"
-	@echo "========================================="
-	@echo " Executable: $(TARGET)"
-	@echo " Size: $$(ls -lh $(TARGET) 2>/dev/null | awk '{print $$5}' || echo 'N/A')"
-	@echo ""
-	@echo " FEATURES:"
-	@echo "  - Sound Blaster/AdLib FM audio"
-	@echo "  - 32x32 detailed enemy sprites"
-	@echo "  - Stone masonry wall textures"
-	@echo "  - WASD + Mouse controls"
-	@echo "========================================="
+$(BUILD):
+	mkdir -p $(BUILD)
 
-%.o: %.c
-	@echo "Compiling $<..."
+$(BUILD)/%.o: src/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(BUILD)/maze2.o: src/maze2.c src/sprites/*.h third_party/midiplay/MIDIPLAY.C src/sound.h src/keyboard.h
+
+# Link, then swap the default go32 stub for CWSDSTUB (CWSDPMI r7 built in) so
+# MAZE2.EXE needs no CWSDPMI.EXE beside it on bare DOS, floppies or DOSBox.
+$(TARGET): $(OBJ)
+	$(CC) $(LDFLAGS) -o $(BUILD)/MAZE2_STUB.EXE $(OBJ) -lm
+	python3 tools/exe2coff.py $(BUILD)/MAZE2_STUB.EXE dos/CWSDSTUB.EXE $@
+	@rm -f $(BUILD)/MAZE2_STUB.EXE
+	@cp $(DATA) $(BUILD)/
+	@ls -l $(TARGET)
+
+# Release bundle: floppy image + zip, both carrying EXE, music data and docs.
+dist: $(TARGET)
+	mkdir -p $(DIST)
+	rm -f $(DIST)/MAZE2.IMG $(DIST)/MAZE2.zip
+	mkfs.fat -C $(DIST)/MAZE2.IMG 1440 >/dev/null
+	mcopy -i $(DIST)/MAZE2.IMG $(TARGET) $(DATA) $(DOCS) ::
+	cd $(BUILD) && zip -q -j ../$(DIST)/MAZE2.zip MAZE2.EXE 1.MID FM.DAT ../dos/README.TXT ../dos/MAZE2.BAT
+	@echo "version $(VERSION)"; ls -l $(DIST)
+
 clean:
-	rm -f $(OBJECTS) $(TARGET) *.o
-	@echo "Build files cleaned"
+	rm -rf $(BUILD) $(DIST)
 
-# Create floppy image
-floppy: $(TARGET)
-	@echo "Creating floppy disk image..."
-	mkfs.fat -C MAZE2.IMG 1440
-	mcopy -i MAZE2.IMG $(TARGET) ::
-	@echo "Floppy image: MAZE2.IMG"
-
-.PHONY: all clean floppy
+.PHONY: all dist clean

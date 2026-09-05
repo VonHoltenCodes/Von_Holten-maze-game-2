@@ -5,15 +5,18 @@
  * Enhanced raycasting engine targeting Pentium 4 era hardware (1.5GHz+)
  * Based on Von_Holten-Maze-Game v3.0 foundation
  *
- * NEW FEATURES:
- * - 64x64 high-resolution wall textures with complex structure
+ * FEATURES:
+ * - 64x64 procedural wall textures, wall decorations, baked torch lighting
  * - Enemies that SHOOT BACK with projectile system
- * - PC Speaker sound effects (shoot, hit, death, pickup)
- * - Procedural brick/stone/metal textures with depth
- * - Doom-style HUD with mini map
- * - Advanced enemy AI with ranged attacks
+ * - Sound Blaster DMA / PC speaker sound effects (non-blocking)
+ * - AdLib/OPL MIDI background music (third_party/midiplay)
+ * - Doom-style HUD with mini map, FPS overlay on F1
+ * - INT 9 key-state keyboard driver: hold WASD, turn with arrows, strafe A/D
+ * - Frame-rate independent movement, timed off the BIOS tick clock
+ * - Self-contained EXE (CWSDPMI stub bound in), no near pointers: runs on
+ *   bare DOS, Win9x DOS boxes, XP NTVDM and DOSBox alike
  *
- * TARGET: Pentium 4, 256MB RAM, VGA Mode 13h (320x200x256)
+ * TARGET: any 486/Pentium with VGA (tuned on Pentium 4 era hardware)
  *
  * By: VonHoltenCodes (2025)
  * License: Open Source
@@ -51,21 +54,19 @@
 #include <math.h>
 #include <time.h>
 #include <conio.h>
-
-#ifdef __DJGPP__
 #include <dpmi.h>
 #include <go32.h>
-#include <sys/nearptr.h>
 #include <dos.h>
-#include <bios.h>
 #include <pc.h>
-#endif
+#include <sys/farptr.h>
 
-/* Working audio from original maze game */
-#include "adlib.h"
+#include "sound.h"
+#include "keyboard.h"
 
-/* MIDI music playback from shdon.com */
+/* MIDI music playback by Steven H Don - see third_party/midiplay/NOTICE.md */
 #include "MIDIPLAY.C"
+
+#define MAZE2_VERSION "2.1.0"
 
 /* 64x64 enemy sprites - hand-drawn pixel art */
 #include "sprites/sprite_creeper.h"
@@ -93,13 +94,15 @@
 #define MAP_HEIGHT 24
 
 /* Movement settings */
-#define MOVE_SPEED 0.12
-#define ROTATE_SPEED 0.08
-#define MOUSE_SENSITIVITY 0.003
+#define MOVE_SPEED 3.0           /* world units per second */
+#define ROTATE_SPEED 2.2         /* radians per second (arrow keys) */
+#define MOUSE_SENSITIVITY 0.003  /* radians per mouse count */
+#define MAX_FRAME_DT 0.1         /* clamp for frame time so a stall can't teleport anything */
 
 /* Combat settings */
 #define MAX_PROJECTILES 32
-#define PROJECTILE_SPEED 0.3
+#define PROJECTILE_SPEED 9.0     /* world units per second */
+#define ENEMY_SPEED 0.5          /* world units per second */
 #define ENEMY_FIRE_RATE 2000    /* ms between enemy shots */
 #define ENEMY_FIRE_RANGE 15.0   /* Max distance enemy can shoot */
 #define PLAYER_STARTING_HEALTH 100
@@ -160,8 +163,8 @@ typedef struct {
     int health;
     int maxHealth;         /* For respawn */
     int type;              /* Enemy type */
-    clock_t lastFireTime;  /* When enemy last shot */
-    clock_t deathTime;     /* When enemy died (for respawn) */
+    unsigned long lastFireTime;  /* game ms when enemy last shot */
+    unsigned long deathTime;     /* game ms when enemy died (for respawn) */
     int canShoot;          /* Does this enemy type shoot? */
 } Enemy;
 
@@ -191,16 +194,6 @@ typedef struct {
     double intensity;
     clock_t lastFlicker;
 } Torch;
-
-/* Fire particle structure */
-typedef struct {
-    double x, y, z;
-    double vx, vy, vz;
-    int life;
-    unsigned char color;
-} FireParticle;
-
-#define MAX_FIRE_PARTICLES 64
 
 /*============================================================================
  * WEAPON SPRITE - 60x40 pistol
@@ -284,13 +277,6 @@ void initEnemySprites(void) {
  * [SEC-06] GLOBAL STATE
  *===========================================================================*/
 
-/* VGA memory pointer */
-#ifdef __DJGPP__
-static unsigned char *VGA_MEMORY = (unsigned char *)0xA0000;
-#else
-static unsigned char *VGA_MEMORY;
-#endif
-
 /* Double buffer */
 static unsigned char *backBuffer = NULL;
 
@@ -298,22 +284,24 @@ static unsigned char *backBuffer = NULL;
 static double zBuffer[SCREEN_WIDTH];
 
 /* Input state */
-static unsigned char keyDown[128] = {0};
 static int mouseAvailable = 0;
 static int playerPitch = 0;
+static int showFps = 0;
+
+/* Frame timing - BIOS tick clock (18.2 Hz), immune to the MIDI player's PIT reprogramming */
+static double frameDt = 1.0 / 30.0;   /* seconds per frame, smoothed */
+static double fpsEstimate = 30.0;
 
 /* Game state */
 static Player player;
 static Projectile projectiles[MAX_PROJECTILES];
 static Enemy enemies[MAX_ENEMIES];
 static int numEnemies = 0;
-static clock_t gameStartTime;
 static int gameRunning = 1;
 
 /* Dynamic lighting */
 static Torch torches[MAX_TORCHES];
 static int numTorches = 0;
-static FireParticle fireParticles[MAX_FIRE_PARTICLES];
 
 /* Sound state */
 static int soundEnabled = 1;  /* Enable sound by default */
@@ -326,67 +314,67 @@ static unsigned char wallTextures[4][TEX_SIZE * TEX_SIZE];
  * Uses working modules from original maze game (sound.c, adlib.c)
  *===========================================================================*/
 
-/* External functions from sound.c */
-extern int initAudio(void);
-extern void playToneBlocking(int frequency, int durationMs);
-extern void shutdownAudio(void);
-extern int isAudioAvailable(void);
+/* Timing helpers - BIOS tick count at 0040:006C (18.2 Hz) */
+static unsigned long biosTicks(void) { return _farpeekl(_dos_ds, 0x46C); }
+static unsigned long gameMs(void) { return (unsigned long)(biosTicks() * 54.925); }
 
-/* Initialize sound - calls working audio module */
+/* Estimate seconds per frame from frames counted between BIOS ticks. */
+static void updateFrameTiming(void) {
+    static unsigned long lastTick = 0;
+    static int framesSinceTick = 0;
+    unsigned long t = biosTicks();
+    if (lastTick == 0) { lastTick = t; return; }
+    framesSinceTick++;
+    if (t != lastTick) {
+        double measured = (double)(t - lastTick) * (1.0 / 18.2065) / framesSinceTick;
+        frameDt = frameDt * 0.7 + measured * 0.3;
+        if (frameDt > MAX_FRAME_DT) frameDt = MAX_FRAME_DT;
+        if (frameDt < 0.001) frameDt = 0.001;
+        fpsEstimate = 1.0 / frameDt;
+        lastTick = t;
+        framesSinceTick = 0;
+    }
+}
+
+/* Sound effects as (Hz, ms) steps - see sound.h. Higher priority interrupts lower. */
+static const SoundStep stShoot[]  = { {400, 20}, {200, 15} };
+static const SoundStep stHit[]    = { {150, 25} };
+static const SoundStep stDeath[]  = { {250, 40}, {120, 50}, {60, 60} };
+static const SoundStep stHurt[]   = { {80, 50} };
+static const SoundStep stPickup[] = { {600, 20}, {800, 20}, {1000, 25} };
+static const SoundStep stStep[]   = { {60, 15} };
+static const SoundFx fxShoot  = { stShoot, 2, 2 };
+static const SoundFx fxHit    = { stHit, 1, 2 };
+static const SoundFx fxDeath  = { stDeath, 3, 3 };
+static const SoundFx fxHurt   = { stHurt, 1, 3 };
+static const SoundFx fxPickup = { stPickup, 3, 4 };
+static const SoundFx fxStep   = { stStep, 1, 0 };
+
 void initSound(void) {
     if (!soundEnabled) return;
-    initAudio();       /* Sound Blaster PCM from sound.c */
-    initAdLib();       /* AdLib FM music from adlib.c */
+    sound_init(1);
 }
 
-/* Sound effects using Sound Blaster PCM */
-void soundShoot(void) {
-    if (!soundEnabled) return;
-    playToneBlocking(400, 20);
-    playToneBlocking(200, 15);
-}
+void soundShoot(void)      { if (soundEnabled) sound_play(&fxShoot); }
+void soundHit(void)        { if (soundEnabled) sound_play(&fxHit); }
+void soundEnemyDeath(void) { if (soundEnabled) sound_play(&fxDeath); }
+void soundPlayerHurt(void) { if (soundEnabled) sound_play(&fxHurt); }
+void soundPickup(void)     { if (soundEnabled) sound_play(&fxPickup); }
 
-void soundHit(void) {
-    if (!soundEnabled) return;
-    playToneBlocking(150, 25);
-}
-
-void soundEnemyDeath(void) {
-    if (!soundEnabled) return;
-    playToneBlocking(250, 40);
-    playToneBlocking(120, 50);
-    playToneBlocking(60, 60);
-}
-
-void soundPlayerHurt(void) {
-    if (!soundEnabled) return;
-    playToneBlocking(80, 50);
-}
-
-void soundPickup(void) {
-    if (!soundEnabled) return;
-    playToneBlocking(600, 20);
-    playToneBlocking(800, 20);
-    playToneBlocking(1000, 25);
-}
-
-static clock_t lastFootstep = 0;
+static unsigned long lastFootstep = 0;
 #define FOOTSTEP_INTERVAL 400  /* ms between footsteps */
 
 void soundStep(void) {
-    clock_t now = clock();
-    long elapsed = (now - lastFootstep) * 1000 / CLOCKS_PER_SEC;
-    if (elapsed < FOOTSTEP_INTERVAL) return;
-
+    unsigned long now = gameMs();
+    if (now - lastFootstep < FOOTSTEP_INTERVAL) return;
     if (!soundEnabled) return;
-    /* Low thud for footstep */
-    playToneBlocking(60, 15);
+    sound_play(&fxStep);
     lastFootstep = now;
 }
 
 void updateSound(void) {
     if (!soundEnabled) return;
-    updateMusic();  /* Update AdLib music from adlib.c */
+    sound_update();   /* steps the PC-speaker sequencer; no-op on Sound Blaster */
 }
 
 /*============================================================================
@@ -618,11 +606,7 @@ void waitForVRetrace(void) {
 
 void displayFrame(void) {
     waitForVRetrace();
-#ifdef __DJGPP__
-    dosmemput(backBuffer, BUFFER_SIZE, 0xA0000);
-#else
-    memcpy(VGA_MEMORY, backBuffer, BUFFER_SIZE);
-#endif
+    dosmemput(backBuffer, BUFFER_SIZE, 0xA0000);   /* no near pointers: works under NTVDM too */
 }
 
 void setVideoMode(int mode) {
@@ -747,39 +731,6 @@ void clearScreen(unsigned char color) {
  * INPUT HANDLING
  *===========================================================================*/
 
-void readKeyboardState(unsigned char *keys) {
-    memset(keys, 0, 128);
-
-    if (kbhit()) {
-        int ch = getch();
-        if (ch == 27) keys[1] = 1;  /* ESC */
-    }
-
-#ifdef __DJGPP__
-    __dpmi_regs regs;
-    regs.h.ah = 0x12;
-    __dpmi_int(0x16, &regs);
-
-    while (_bios_keybrd(0x11) != 0) {
-        int keycode = _bios_keybrd(0x11);
-        int scancode = (keycode >> 8) & 0xFF;
-
-        if (scancode == 0x48) keys[72] = 1;  /* Up */
-        if (scancode == 0x50) keys[80] = 1;  /* Down */
-        if (scancode == 0x4B) keys[75] = 1;  /* Left */
-        if (scancode == 0x4D) keys[77] = 1;  /* Right */
-        if (scancode == 0x39) keys[57] = 1;  /* SPACE */
-        if (scancode == 0x01) keys[1] = 1;   /* ESC */
-        if (scancode == 0x1E) keys[30] = 1;  /* A */
-        if (scancode == 0x20) keys[32] = 1;  /* D */
-        if (scancode == 0x11) keys[17] = 1;  /* W */
-        if (scancode == 0x1F) keys[31] = 1;  /* S */
-
-        _bios_keybrd(0x10);
-    }
-#endif
-}
-
 void initMouse(void) {
     union REGS r;
     r.x.ax = 0;
@@ -857,8 +808,8 @@ void updateProjectiles(void) {
         if (!projectiles[i].active) continue;
 
         /* Move projectile */
-        double newX = projectiles[i].x + projectiles[i].dirX * PROJECTILE_SPEED;
-        double newY = projectiles[i].y + projectiles[i].dirY * PROJECTILE_SPEED;
+        double newX = projectiles[i].x + projectiles[i].dirX * PROJECTILE_SPEED * frameDt;
+        double newY = projectiles[i].y + projectiles[i].dirY * PROJECTILE_SPEED * frameDt;
 
         /* Check wall collision */
         if (worldMap[(int)newY][(int)newX] != 0) {
@@ -892,7 +843,7 @@ void updateProjectiles(void) {
 
                     if (enemies[j].health <= 0) {
                         enemies[j].active = 0;
-                        enemies[j].deathTime = clock();  /* Record death time for respawn */
+                        enemies[j].deathTime = gameMs();  /* Record death time for respawn */
                         player.score += (enemies[j].type + 1) * 100;
                         soundEnemyDeath();  /* [SEC-08] Sound effect */
                     }
@@ -946,7 +897,7 @@ void initEnemies(void) {
     numEnemies++;
 
     enemies[numEnemies].x = enemies[numEnemies].spawnX = 10.5;
-    enemies[numEnemies].y = enemies[numEnemies].spawnY = 12.5;
+    enemies[numEnemies].y = enemies[numEnemies].spawnY = 13.5;   /* (was 12.5: inside a wall cell) */
     enemies[numEnemies].active = 1;
     enemies[numEnemies].health = enemies[numEnemies].maxHealth = 75;
     enemies[numEnemies].type = ENEMY_SOLDIER;
@@ -1062,6 +1013,16 @@ double getTorchLight(double x, double y) {
     return totalLight;
 }
 
+/* Torches never move, so bake their light per map cell once at startup
+ * instead of summing 16 square roots per screen column per frame. */
+static double lightMap[MAP_HEIGHT][MAP_WIDTH];
+void buildLightMap(void) {
+    int x, y;
+    for (y = 0; y < MAP_HEIGHT; y++)
+        for (x = 0; x < MAP_WIDTH; x++)
+            lightMap[y][x] = getTorchLight(x + 0.5, y + 0.5);
+}
+
 /* Check line of sight from enemy to player */
 int enemyCanSeePlayer(int enemyIdx) {
     double dx = player.x - enemies[enemyIdx].x;
@@ -1091,13 +1052,13 @@ int enemyCanSeePlayer(int enemyIdx) {
 }
 
 void updateEnemyAI(void) {
-    clock_t now = clock();
+    unsigned long now = gameMs();
     int i;
 
     /* Check for enemy respawns */
     for (i = 0; i < numEnemies; i++) {
         if (!enemies[i].active && enemies[i].deathTime > 0) {
-            long elapsed = (now - enemies[i].deathTime) * 1000 / CLOCKS_PER_SEC;
+            unsigned long elapsed = now - enemies[i].deathTime;
             if (elapsed > ENEMY_RESPAWN_TIME) {
                 /* Respawn the enemy at spawn point */
                 enemies[i].x = enemies[i].spawnX;
@@ -1119,8 +1080,8 @@ void updateEnemyAI(void) {
 
         /* Move toward player (slowly) */
         if (dist > 1.5) {
-            double moveX = (dx / dist) * 0.015;
-            double moveY = (dy / dist) * 0.015;
+            double moveX = (dx / dist) * ENEMY_SPEED * frameDt;
+            double moveY = (dy / dist) * ENEMY_SPEED * frameDt;
 
             double newX = enemies[i].x + moveX;
             double newY = enemies[i].y + moveY;
@@ -1140,7 +1101,7 @@ void updateEnemyAI(void) {
             if (enemies[i].type == ENEMY_ELITE) fireRate = 1200;  /* Faster */
             if (enemies[i].type == ENEMY_BOSS) fireRate = 800;    /* Very fast */
 
-            long elapsed = (now - enemies[i].lastFireTime) * 1000 / CLOCKS_PER_SEC;
+            unsigned long elapsed = now - enemies[i].lastFireTime;
 
             if (elapsed > fireRate) {
                 /* Fire at player! */
@@ -1233,18 +1194,9 @@ void renderFrame(void) {
     /* Draw ceiling - night sky with stars */
     {
         int horizonY = SCREEN_CENTER + playerPitch;
-        for (y = 0; y < horizonY; y++) {
-            int distFromHorizon = horizonY - y;
-            for (x = 0; x < SCREEN_WIDTH; x++) {
-                unsigned char color;
-                /* Dark sky gradient - black at top, dark gray at horizon */
-                if (distFromHorizon < 15) {
-                    color = 8;  /* Dark gray near horizon */
-                } else {
-                    color = 0;  /* Black sky */
-                }
-                backBuffer[y * SCREEN_WIDTH + x] = color;
-            }
+        for (y = 0; y < horizonY && y < SCREEN_HEIGHT; y++) {
+            /* Dark sky gradient - black at top, dark gray near the horizon */
+            memset(backBuffer + y * SCREEN_WIDTH, (horizonY - y < 15) ? 8 : 0, SCREEN_WIDTH);
         }
 
         /* Add stars to sky - shift with player angle for parallax */
@@ -1264,50 +1216,38 @@ void renderFrame(void) {
         }
     }
 
-    /* Draw floor - red/brown stone tiles locked to world position */
-    /* Floor moves with pitch to match walls */
-    for (y = SCREEN_CENTER + playerPitch; y < SCREEN_HEIGHT; y++) {
-        int distFromHorizon = y - (SCREEN_CENTER + playerPitch);
-        /* Calculate distance - use screen-relative position for correct perspective */
-        double rowDist = (double)(SCREEN_HEIGHT / 2) / (y - (SCREEN_CENTER + playerPitch) + 0.1);
-
-        for (x = 0; x < SCREEN_WIDTH; x++) {
-            unsigned char color;
-            /* Calculate world floor position for this pixel */
-            double floorX = player.x + rowDist * (player.dirX + player.planeX * (2.0 * x / SCREEN_WIDTH - 1));
-            double floorY = player.y + rowDist * (player.dirY + player.planeY * (2.0 * x / SCREEN_WIDTH - 1));
-
-            /* Tile coordinates in world space */
-            int tileX = (int)(floorX * 4) & 7;  /* 4 tiles per unit, wrap at 8 */
-            int tileY = (int)(floorY * 4) & 7;
-            int cellX = (int)(floorX * 4);
-            int cellY = (int)(floorY * 4);
-
-            /* Grout lines at tile edges */
-            int isGrout = (tileX == 0 || tileY == 0);
-
-            /* Checkerboard pattern */
-            int checker = (cellX + cellY) & 1;
-
-            if (distFromHorizon < 8) {
-                color = 0;  /* Black at horizon for depth fade */
-            } else if (isGrout) {
-                color = 0;  /* Black grout */
-            } else if (checker) {
-                color = 4;  /* Dark red tile */
-            } else {
-                color = 6;  /* Brown/orange tile */
+    /* Floor - red/brown tiles locked to world position. One perspective divide
+     * per row, then the world position steps across the row in 16.16 fixed
+     * point (scaled x4 = 4 tiles per unit), so the pixel loop is integer only. */
+    {
+        int horizonY = SCREEN_CENTER + playerPitch;
+        double rayDirX0 = player.dirX - player.planeX, rayDirY0 = player.dirY - player.planeY;
+        double rayDirX1 = player.dirX + player.planeX, rayDirY1 = player.dirY + player.planeY;
+        for (y = horizonY < 0 ? 0 : horizonY; y < SCREEN_HEIGHT; y++) {
+            int distFromHorizon = y - horizonY;
+            double rowDist = (double)(SCREEN_HEIGHT / 2) / (distFromHorizon + 0.1);
+            unsigned char *row = backBuffer + y * SCREEN_WIDTH;
+            unsigned char fadeColor;
+            long fx, fy, fdx, fdy;
+            if (distFromHorizon < 8 || rowDist > 10.0) {   /* horizon band and far rows fade to black */
+                memset(row, 0, SCREEN_WIDTH);
+                continue;
             }
-
-            /* Distance fade - darken far tiles */
-            if (rowDist > 6.0 && color != 0) {
-                color = 4;  /* Fade to dark red */
+            fadeColor = (rowDist > 6.0) ? 4 : 0;             /* mid distance: both tiles go dark red */
+            fx  = (long)((player.x + rowDist * rayDirX0) * (4.0 * 65536.0));
+            fy  = (long)((player.y + rowDist * rayDirY0) * (4.0 * 65536.0));
+            fdx = (long)(rowDist * (rayDirX1 - rayDirX0) * (4.0 * 65536.0) / SCREEN_WIDTH);
+            fdy = (long)(rowDist * (rayDirY1 - rayDirY0) * (4.0 * 65536.0) / SCREEN_WIDTH);
+            for (x = 0; x < SCREEN_WIDTH; x++) {
+                int cellX = (int)(fx >> 16), cellY = (int)(fy >> 16);
+                unsigned char color;
+                if ((cellX & 7) == 0 || (cellY & 7) == 0) color = 0;   /* black grout lines */
+                else if (fadeColor) color = fadeColor;
+                else color = ((cellX + cellY) & 1) ? 4 : 6;           /* dark red / brown checker */
+                row[x] = color;
+                fx += fdx;
+                fy += fdy;
             }
-            if (rowDist > 10.0 && color != 0) {
-                color = 0;  /* Fade to black */
-            }
-
-            backBuffer[y * SCREEN_WIDTH + x] = color;
         }
     }
 
@@ -1367,6 +1307,7 @@ void renderFrame(void) {
         zBuffer[x] = perpWallDist;
 
         int lineHeight = (int)(SCREEN_HEIGHT / perpWallDist);
+        if (lineHeight < 1) lineHeight = 1;
         int drawStart = -lineHeight / 2 + SCREEN_CENTER + playerPitch;
         int drawEnd = lineHeight / 2 + SCREEN_CENTER + playerPitch;
         if (drawStart < 0) drawStart = 0;
@@ -1388,12 +1329,12 @@ void renderFrame(void) {
         if (wallType < 0) wallType = 0;
         if (wallType > 3) wallType = 3;
 
-        /* Draw textured vertical line */
-        double step = (double)TEX_SIZE / lineHeight;
-        double texPos = (drawStart - SCREEN_CENTER - playerPitch + lineHeight / 2) * step;
+        /* Draw textured vertical line - texture row steps in 16.16 fixed point */
+        long texStep = (long)((double)TEX_SIZE * 65536.0 / lineHeight);
+        long texPos = (long)(drawStart - SCREEN_CENTER - playerPitch + lineHeight / 2) * texStep;
 
-        /* Get torch light at wall position */
-        double torchLight = getTorchLight((double)mapX + 0.5, (double)mapY + 0.5);
+        /* Baked torch light for this wall cell */
+        double torchLight = lightMap[mapY][mapX];
 
         /* Check for wall decorations (paintings and TVs) */
         /* Hash wall position for pseudo-random decoration placement */
@@ -1402,8 +1343,8 @@ void renderFrame(void) {
         int decorType = decorHash % 3;   /* 0=painting, 1=TV, 2=painting */
 
         for (y = drawStart; y < drawEnd; y++) {
-            int texY = ((int)texPos) & TEX_MASK;
-            texPos += step;
+            int texY = (int)(texPos >> 16) & TEX_MASK;
+            texPos += texStep;
 
             unsigned char color = wallTextures[wallType][texY * TEX_SIZE + texX];
 
@@ -1542,23 +1483,30 @@ void renderSprites(void) {
         sprWidth = 64;
         sprHeight = 64;
 
-        /* Draw scaled bitmap sprite with z-buffer test */
-        for (x = drawStartX; x < drawEndX; x++) {
-            /* Z-buffer: only draw if sprite is closer than wall */
-            if (transformY >= zBuffer[x]) continue;
-
-            int texX = ((x - (-spriteWidth / 2 + spriteScreenX)) * sprWidth) / spriteWidth;
-            if (texX < 0) texX = 0;
-            if (texX >= sprWidth) texX = sprWidth - 1;
-
-            for (y = drawStartY; y < drawEndY; y++) {
-                int texY = ((y - (-spriteHeight / 2 + SCREEN_CENTER + playerPitch)) * sprHeight) / spriteHeight;
-                if (texY < 0) texY = 0;
-                if (texY >= sprHeight) texY = sprHeight - 1;
-
-                unsigned char pixel = sprite[texY * sprWidth + texX];
-                if (pixel != 255 && pixel != 0) {  /* 255 or 0 = transparent */
-                    backBuffer[y * SCREEN_WIDTH + x] = pixel;
+        /* Draw scaled bitmap sprite with z-buffer test. Texture coordinates
+         * step in 16.16 fixed point so there are no divides in the pixel loops. */
+        {
+            long stepX = ((long)sprWidth << 16) / spriteWidth;
+            long stepY = ((long)sprHeight << 16) / spriteHeight;
+            long texXf = (long)(drawStartX - (-spriteWidth / 2 + spriteScreenX)) * stepX;
+            long texY0 = (long)(drawStartY - (-spriteHeight / 2 + SCREEN_CENTER + playerPitch)) * stepY;
+            for (x = drawStartX; x < drawEndX; x++, texXf += stepX) {
+                int texX = (int)(texXf >> 16);
+                long texYf = texY0;
+                unsigned char *dst;
+                const unsigned char *col;
+                if (transformY >= zBuffer[x]) continue;   /* a wall is in front of this column */
+                if (texX < 0) texX = 0;
+                if (texX >= sprWidth) texX = sprWidth - 1;
+                col = sprite + texX;
+                dst = backBuffer + drawStartY * SCREEN_WIDTH + x;
+                for (y = drawStartY; y < drawEndY; y++, texYf += stepY, dst += SCREEN_WIDTH) {
+                    int texY = (int)(texYf >> 16);
+                    unsigned char pixel;
+                    if (texY < 0) texY = 0;
+                    if (texY >= sprHeight) texY = sprHeight - 1;
+                    pixel = col[texY * sprWidth];
+                    if (pixel != 255 && pixel != 0) *dst = pixel;   /* 255 or 0 = transparent */
                 }
             }
         }
@@ -1651,7 +1599,6 @@ void renderSprites(void) {
                     int relY = y - drawStartY;
                     int relX = x - spriteScreenX;
                     int flameHeight = torchHeight * 2 / 3;  /* Top 2/3 is flame */
-                    int handleHeight = torchHeight - flameHeight;
 
                     unsigned char color = 0;
 
@@ -1662,7 +1609,6 @@ void renderSprites(void) {
                         }
                     } else {
                         /* Flame part - animated orange/yellow/red */
-                        int flameCenter = torchWidth / 2;
                         int distFromCenter = (relX < 0) ? -relX : relX;
 
                         /* Flame narrows toward top */
@@ -1846,7 +1792,7 @@ void drawMiniMap(int mapX, int mapY, int mapSize) {
     {
         int exitX = mapX + 22 * cellSize;
         int exitY = mapY + 22 * cellSize;
-        unsigned char exitColor = ((clock() / (CLOCKS_PER_SEC / 4)) % 2) ? COLOR_YELLOW : COLOR_BWHITE;
+        unsigned char exitColor = ((gameMs() / 250) % 2) ? COLOR_YELLOW : COLOR_BWHITE;
         setPixel(exitX, exitY, exitColor);
         setPixel(exitX+1, exitY, exitColor);
         setPixel(exitX, exitY+1, exitColor);
@@ -1973,6 +1919,14 @@ void drawHUD(void) {
     /* Draw mini map in top-right corner */
     drawMiniMap(SCREEN_WIDTH - 52, 4, 48);
 
+    /* FPS overlay (F1) */
+    if (showFps) {
+        sprintf(buffer, "FPS %3d", (int)(fpsEstimate + 0.5));
+        drawText(4, 4, buffer, COLOR_LGREEN);
+        sprintf(buffer, "X%4.1f Y%4.1f", player.x, player.y);
+        drawText(4, 14, buffer, COLOR_GRAY);
+    }
+
     /* Crosshair in center of view */
     {
         int cx = SCREEN_WIDTH / 2;
@@ -1996,38 +1950,41 @@ void drawHUD(void) {
  *===========================================================================*/
 
 void handleInput(void) {
-    static clock_t lastShot = 0;
-    clock_t now = clock();
+    static unsigned long lastShot = 0;
+    unsigned long now = gameMs();
+    int mx, my;
+    double move = 0.0, strafe = 0.0, turn = 0.0;
 
-    readKeyboardState(keyDown);
-
-    /* ESC to quit */
-    if (keyDown[1]) {
+    if (kb_pressed(KEY_ESC)) {
         gameRunning = 0;
         return;
     }
+    if (kb_pressed(KEY_F1) || kb_pressed(KEY_F)) showFps = !showFps;
 
     /* Mouse look */
-    int mx, my;
     getMouseDelta(&mx, &my);
-    if (mx != 0) {
-        rotatePlayer(mx * MOUSE_SENSITIVITY);
-    }
+    if (mx != 0) rotatePlayer(mx * MOUSE_SENSITIVITY);
     if (my != 0) {
         playerPitch -= my;
         if (playerPitch > 50) playerPitch = 50;
         if (playerPitch < -50) playerPitch = -50;
     }
 
-    /* Movement - WASD or arrows */
-    if (keyDown[72] || keyDown[17]) movePlayer(1.0);   /* Up / W */
-    if (keyDown[80] || keyDown[31]) movePlayer(-1.0);  /* Down / S */
-    if (keyDown[75] || keyDown[30]) strafePlayer(-1.0); /* Left / A */
-    if (keyDown[77] || keyDown[32]) strafePlayer(1.0);  /* Right / D */
+    /* Movement: W/S or Up/Down move, A/D strafe, Left/Right turn.
+     * Keys are read from the INT 9 key-state table so several can be held at
+     * once, and everything scales with frame time. */
+    if (kb_down(KEY_W) || kb_down(KEY_UP))   move += 1.0;
+    if (kb_down(KEY_S) || kb_down(KEY_DOWN)) move -= 1.0;
+    if (kb_down(KEY_A)) strafe -= 1.0;
+    if (kb_down(KEY_D)) strafe += 1.0;
+    if (kb_down(KEY_LEFT))  turn -= 1.0;
+    if (kb_down(KEY_RIGHT)) turn += 1.0;
+    if (move != 0.0)   movePlayer(move * frameDt);
+    if (strafe != 0.0) strafePlayer(strafe * frameDt);
+    if (turn != 0.0)   rotatePlayer(turn * ROTATE_SPEED * frameDt);
 
-    /* Shooting - SPACE or mouse */
-    if ((keyDown[57] || getMouseButton()) &&
-        (now - lastShot) > CLOCKS_PER_SEC / 8) {  /* 8 shots per second max */
+    /* Shooting - SPACE, CTRL or mouse button; 8 shots per second max */
+    if ((kb_pressed(KEY_SPACE) || kb_down(KEY_SPACE) || kb_down(KEY_LCTRL) || getMouseButton()) && now - lastShot > 125) {
         playerShoot();
         lastShot = now;
     }
@@ -2104,8 +2061,8 @@ void drawSplashScreen(void) {
     int titleX = centerX - (titleLen * 8) / 2;
     clock_t startTime = clock();
 
-    /* Cascade animation for title */
-    for (frame = 0; frame < 30; frame++) {
+    /* Cascade animation for title (a key skips it) */
+    for (frame = 0; frame < 30 && !kbhit(); frame++) {
         clearScreen(COLOR_BLACK);
 
         /* Draw starfield background */
@@ -2131,7 +2088,9 @@ void drawSplashScreen(void) {
         while ((clock() - startTime) * 1000 / CLOCKS_PER_SEC < frame * 80);
     }
 
-    /* Final splash with all content - animate until key press */
+    /* Final splash with all content - animate until key press.
+     * Keys mashed during loading / the cascade are dropped first so they can't skip the title. */
+    while (kbhit()) getch();
     while (!kbhit()) {
         clearScreen(COLOR_BLACK);
         drawStarfield(frame++);
@@ -2195,7 +2154,7 @@ void drawCreditsScreen(void) {
     drawText(centerX - 80, 122, "ENGINE:", COLOR_CYAN);
     drawText(centerX - 80, 134, "DDA RAYCASTING", COLOR_WHITE);
 
-    drawText(centerX - 80, 154, "YEAR: 2025", COLOR_GRAY);
+    drawText(centerX - 80, 154, "V" MAZE2_VERSION " - 2025", COLOR_GRAY);
 
     /* Loading text */
     drawText(centerX - 48, 180, "LOADING...", COLOR_LGREEN);
@@ -2235,7 +2194,7 @@ static const char *credits[] = {
     "DJGPP TEAM",
     "",
     "",
-    "YEAR 2025",
+    "VERSION " MAZE2_VERSION " - 2025",
     "",
     "",
     "THANKS FOR PLAYING!",
@@ -2310,87 +2269,149 @@ void drawScrollingCredits(void) {
  * MAIN
  *===========================================================================*/
 
-int main(void) {
-#ifdef __DJGPP__
-    if (!__djgpp_nearptr_enable()) {
-        printf("ERROR: Could not enable near pointers!\n");
-        return 1;
+/* Data files (FM.DAT, 1.MID) live beside MAZE2.EXE, wherever it was launched from */
+static char dataDir[260] = "";
+static char fmPath[300], midPath[300];
+
+static void initDataDir(const char *argv0) {
+    const char *p = argv0 ? strrchr(argv0, '/') : NULL;
+    const char *q = argv0 ? strrchr(argv0, '\\') : NULL;
+    size_t n;
+    if (q > p) p = q;
+    if (!p) { dataDir[0] = 0; return; }
+    n = (size_t)(p - argv0) + 1;
+    if (n >= sizeof dataDir) n = sizeof dataDir - 1;
+    memcpy(dataDir, argv0, n);
+    dataDir[n] = 0;
+}
+
+/* Runs on every exit path (atexit) so a crash-out never leaves the keyboard
+ * or timer hooked, the OPL playing, or the screen in mode 13h. */
+static int debugSpawn = 0;
+static double debugX, debugY, debugDeg;
+
+static int cleanedUp = 0;
+static void cleanup(void) {
+    if (cleanedUp) return;
+    cleanedUp = 1;
+    kb_remove();
+    StopMIDI();
+    UnloadMIDI();
+    sound_shutdown();
+    setVideoMode(0x03);
+    freeDoubleBuffer();
+}
+
+int main(int argc, char **argv) {
+    int musicOn = 0;
+    unsigned long frames = 0, startTicks = 0, playTicks;
+
+    initDataDir(argc > 0 ? argv[0] : NULL);
+    {
+        int i;
+        for (i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "-nosound") == 0) soundEnabled = 0;        /* skip the SB probe and music */
+            else if (strcmp(argv[i], "-at") == 0 && i + 3 < argc) {         /* -at X Y DEGREES: debug spawn */
+                debugSpawn = 1;
+                debugX = atof(argv[i + 1]); debugY = atof(argv[i + 2]); debugDeg = atof(argv[i + 3]);
+                i += 3;
+            }
+        }
     }
-#endif
+    printf("MAZE RUNNER 2 v%s - VonHoltenCodes\n", MAZE2_VERSION);
 
     /* Initialize systems */
     initDoubleBuffer();
     initFont();
     initTextures();
-    initEnemySprites();  /* [SEC-05] Procedural enemy sprites */
+    initEnemySprites();
     initPlayer();
+    if (debugSpawn && worldMap[(int)debugY][(int)debugX] == 0) {
+        player.x = debugX;
+        player.y = debugY;
+        rotatePlayer(debugDeg * 3.14159265 / 180.0);
+    }
     initProjectiles();
     initEnemies();
-    initTorches();  /* [SEC-03] Dynamic lighting */
-    initSound();    /* [SEC-08] Sound Blaster/AdLib */
+    initTorches();
+    buildLightMap();
+    initSound();
     initMouse();
+    atexit(cleanup);
+
+    /* Start MIDI music: InitMIDI saves the timer vector, SetFM probes the OPL and loads FM.DAT */
+    InitMIDI();
+    sprintf(fmPath, "%sFM.DAT", dataDir);
+    sprintf(midPath, "%s1.MID", dataDir);
+    FMDataFile = fmPath;
+    if (soundEnabled && SetFM()) {
+        if (LoadMIDI(midPath)) {
+            SetVol(200);
+            PlayMIDI();
+            musicOn = 1;
+        }
+    }
+    printf("[ MUSIC  ] %s\n", musicOn ? "OPL FM synth found - MIDI playing" : "no OPL synth or 1.MID - music off");
+    printf("[ INPUT  ] %s\n", mouseAvailable ? "mouse driver found" : "no mouse driver - keyboard only (arrows turn)");
 
     /* Enter VGA mode */
     setVideoMode(0x13);
 
-    /* Use default VGA 256-color palette - has full color range for sprites */
-    /* setupDungeonPalette(); - disabled, breaks sprite colors */
-
-    /* Initialize and start MIDI music */
-    InitMIDI();    /* CRITICAL: Must call this first to set up timer handler */
-    if (SetFM()) { /* Detect FM chip and load FM.DAT instruments */
-        if (LoadMIDI("1.MID")) {
-            SetVol(200);
-            PlayMIDI();
-        }
-    }
-
-    /* Show credits splash */
+    /* Show credits splash, then the title (waits for a key via the BIOS) */
     drawCreditsScreen();
     delay(1500);
-
-    /* Show main splash screen */
     drawSplashScreen();
     getch();
 
-    gameStartTime = clock();
+    /* Take over the keyboard for the game loop */
+    if (!kb_install()) {
+        setVideoMode(0x03);
+        printf("ERROR: could not install the keyboard handler\n");
+        return 1;
+    }
+
+    /* Discard mouse motion that piled up during the title so the view doesn't jerk */
+    {
+        int mx, my;
+        getMouseDelta(&mx, &my);
+    }
 
     /* Main game loop */
+    startTicks = biosTicks();
     while (gameRunning && player.health > 0) {
+        frames++;
+        updateFrameTiming();
         handleInput();
         updateProjectiles();
         updateEnemyAI();
+        updateSound();
 
         /* Check for exit - SE corner of map (around position 22,22) */
         if (player.x > 21.5 && player.y > 21.5) {
-            /* Player reached the exit door! */
             player.score += 1000;  /* Bonus for escaping */
-
-            /* Play victory fanfare */
-            soundPickup();
             soundPickup();
 
-            /* Flash the screen and show "EXIT REACHED" message */
             clearScreen(14);  /* Yellow flash */
             drawText(100, 90, "EXIT REACHED!", 0);
             displayFrame();
             delay(1500);
-
             break;
         }
 
         renderFrame();
         renderSprites();
         drawHUD();
-
         displayFrame();
     }
 
-    /* Show scrolling credits */
+    playTicks = biosTicks() - startTicks;
+
+    /* Hand the keyboard back to the BIOS before the "press any key" credits */
+    kb_remove();
     drawScrollingCredits();
 
     /* Return to text mode */
-    setVideoMode(0x03);
+    cleanup();
 
     printf("\n");
     printf("========================================\n");
@@ -2401,22 +2422,13 @@ int main(void) {
     }
     printf("========================================\n");
     printf("  Final Score: %d\n", player.score);
+    printf("  %lu frames in %.1f s = %.1f fps average\n", frames, playTicks / 18.2065,
+           playTicks ? frames * 18.2065 / playTicks : 0.0);
     printf("========================================\n");
     printf("\n");
-    printf("  MAZE RUNNER 2\n");
+    printf("  MAZE RUNNER 2 v%s\n", MAZE2_VERSION);
     printf("  By VonHoltenCodes 2025\n");
     printf("  Thanks for playing!\n");
     printf("\n");
-
-    /* Stop MIDI music and restore timer */
-    StopMIDI();
-    UnloadMIDI();
-
-    freeDoubleBuffer();
-
-#ifdef __DJGPP__
-    __djgpp_nearptr_disable();
-#endif
-
     return 0;
 }
