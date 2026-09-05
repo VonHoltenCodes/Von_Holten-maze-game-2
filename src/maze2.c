@@ -60,6 +60,8 @@
 #include <pc.h>
 #include <sys/farptr.h>
 #include <stdarg.h>
+#include <unistd.h>
+#include <io.h>
 
 #include "sound.h"
 #include "keyboard.h"
@@ -73,7 +75,11 @@
  * DPMI (Win9x DOS box, NTVDM). Lock the whole program so they can never touch a
  * paged-out page; CWSDPMI without a swap file ignores this. */
 #include <crt0.h>
+#ifdef NO_LOCK
+int _crt0_startup_flags = 0;                /* diagnostic build: MAZE2NL.EXE */
+#else
 int _crt0_startup_flags = _CRT0_FLAG_LOCK_MEMORY | _CRT0_FLAG_NONMOVE_SBRK;
+#endif
 
 /* 64x64 enemy sprites - hand-drawn pixel art */
 #include "sprites/sprite_creeper.h"
@@ -106,6 +112,8 @@ int _crt0_startup_flags = _CRT0_FLAG_LOCK_MEMORY | _CRT0_FLAG_NONMOVE_SBRK;
 #define MOUSE_SENSITIVITY 0.006  /* radians per screen pixel of mouse travel */
 #define MOUSE_CX 320             /* mouse driver centre in mode 13h (x reported doubled) */
 #define MOUSE_CY 100
+static int mouseLastX = MOUSE_CX, mouseLastY = MOUSE_CY;
+static int mouseRawX, mouseRawY, mouseRawMX, mouseRawMY;   /* F1 overlay diagnostics */
 #define MAX_FRAME_DT 0.1         /* clamp for frame time so a stall can't teleport anything */
 
 /* Combat settings */
@@ -751,10 +759,19 @@ void initMouse(void) {
         mouseAvailable = 1;
         r.x.ax = 2;  /* Hide cursor */
         int86(0x33, &r, &r);
+        r.x.ax = 7;  /* horizontal range 0..639 (mode 13h reports x doubled) */
+        r.x.cx = 0; r.x.dx = 639;
+        int86(0x33, &r, &r);
+        r.x.ax = 8;  /* vertical range 0..199 */
+        r.x.cx = 0; r.x.dx = 199;
+        int86(0x33, &r, &r);
         r.x.ax = 4;  /* start in the centre (see getMouseDelta) */
         r.x.cx = MOUSE_CX;
         r.x.dx = MOUSE_CY;
         int86(0x33, &r, &r);
+        r.x.ax = 3;
+        int86(0x33, &r, &r);
+        mouseLastX = (short)r.x.cx; mouseLastY = (short)r.x.dx;
     }
 }
 
@@ -765,6 +782,7 @@ void initMouse(void) {
  * reports x doubled (0..639) and y 0..199. */
 void getMouseDelta(int *dx, int *dy) {
     union REGS r;
+    int x, y;
 
     if (!mouseAvailable) {
         *dx = 0;
@@ -772,16 +790,30 @@ void getMouseDelta(int *dx, int *dy) {
         return;
     }
 
+    r.x.ax = 11;                      /* motion counters, read for the overlay only */
+    int86(0x33, &r, &r);
+    mouseRawMX = (short)r.x.cx; mouseRawMY = (short)r.x.dx;
+
     r.x.ax = 3;                       /* position + buttons */
     int86(0x33, &r, &r);
-    *dx = ((short)r.x.cx - MOUSE_CX) / 2;
-    *dy = (short)r.x.dx - MOUSE_CY;
+    x = (short)r.x.cx; y = (short)r.x.dx;
+    mouseRawX = x; mouseRawY = y;
 
-    if (*dx != 0 || *dy != 0) {
-        r.x.ax = 4;                   /* put the cursor back in the centre */
+    /* delta against the last position we saw, not against the centre: if the
+     * driver ignores "set position" (some NTVDM setups) this still tracks motion */
+    *dx = (x - mouseLastX) / 2;
+    *dy = y - mouseLastY;
+
+    if (x != MOUSE_CX || y != MOUSE_CY) {
+        r.x.ax = 4;                   /* back to the centre so the edges are never reached */
         r.x.cx = MOUSE_CX;
         r.x.dx = MOUSE_CY;
         int86(0x33, &r, &r);
+        r.x.ax = 3;                   /* whatever the driver actually did is the new reference */
+        int86(0x33, &r, &r);
+        mouseLastX = (short)r.x.cx; mouseLastY = (short)r.x.dx;
+    } else {
+        mouseLastX = x; mouseLastY = y;
     }
 }
 
@@ -1961,6 +1993,8 @@ void drawHUD(void) {
         drawText(4, 4, buffer, COLOR_LGREEN);
         sprintf(buffer, "X%4.1f Y%4.1f", player.x, player.y);
         drawText(4, 14, buffer, COLOR_GRAY);
+        sprintf(buffer, "M%4d,%3d D%4d,%3d", mouseRawX, mouseRawY, mouseRawMX, mouseRawMY);
+        drawText(4, 24, buffer, COLOR_GRAY);   /* mouse position / motion counters as the driver reports them */
     }
 
     /* Crosshair in center of view */
@@ -2358,6 +2392,8 @@ static void cleanup(void) {
 int main(int argc, char **argv) {
     int musicOn = 0;
     char buffer[64];
+
+    _write(1, "MAZE2: main() reached\r\n", 23);   /* unbuffered: proves the 32-bit image started */
     unsigned long frames = 0, startTicks = 0, playTicks;
 
     initDataDir(argc > 0 ? argv[0] : NULL);

@@ -22,9 +22,13 @@ stage_xp() {
   echo "==> RetroBeast (XP) $XP_IP"
   smbclient "//$XP_IP/C\$" -U 'RetroBeast%VonHolten2025' --option='client min protocol=NT1' -c "$CMDS"
 }
+# diag: also copy the triage binaries from `make diag` (HELLO.EXE, MAZE2NL.EXE)
+if [ "${2:-}" = "diag" ] || [ "${1:-}" = "diag" ]; then
+  CMDS="$CMDS; put $ROOT/build/diag/HELLO.EXE claude/MAZE2/HELLO.EXE; put $ROOT/build/diag/MAZE2NL.EXE claude/MAZE2/MAZE2NL.EXE; ls claude/MAZE2/*"
+fi
 case "${1:-all}" in
   gx1) stage_gx1 ;;
   xp)  stage_xp ;;
-  all) stage_gx1; stage_xp ;;
-  *) echo "usage: $0 [gx1|xp|all]" >&2; exit 2 ;;
+  all|diag) stage_gx1; stage_xp ;;
+  *) echo "usage: $0 [gx1|xp|all|diag] [diag]" >&2; exit 2 ;;
 esac

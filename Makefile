@@ -50,7 +50,19 @@ dist: $(TARGET)
 	cd $(BUILD) && zip -q -j ../$(DIST)/MAZE2.zip MAZE2.EXE 1.MID FM.DAT ../dos/README.TXT ../dos/MAZE2.BAT
 	@echo "version $(VERSION)"; ls -l $(DIST)
 
+# Diagnostic builds for real-hardware triage (tools/stage-dos.sh diag copies them):
+#   MAZE2NL.EXE  = same game without the start-up memory lock
+#   HELLO.EXE    = prints the DPMI host/version and waits, same stub binding as the game
+diag: $(TARGET)
+	mkdir -p $(BUILD)/diag $(BUILD)/sym
+	$(CC) $(CFLAGS) -DNO_LOCK -c src/maze2.c -o $(BUILD)/sym/maze2_nolock.o
+	$(CC) -s -o $(BUILD)/sym/MAZE2NL_STUB.EXE $(BUILD)/sym/maze2_nolock.o $(BUILD)/sound.o $(BUILD)/keyboard.o -lm
+	python3 tools/exe2coff.py $(BUILD)/sym/MAZE2NL_STUB.EXE dos/CWSDSTUB.EXE $(BUILD)/diag/MAZE2NL.EXE
+	$(CC) -s -o $(BUILD)/sym/HELLO_STUB.EXE tools/hello.c
+	python3 tools/exe2coff.py $(BUILD)/sym/HELLO_STUB.EXE dos/CWSDSTUB.EXE $(BUILD)/diag/HELLO.EXE
+	@ls -l $(BUILD)/diag
+
 clean:
 	rm -rf $(BUILD) $(DIST)
 
-.PHONY: all dist clean
+.PHONY: all dist diag clean
