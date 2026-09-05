@@ -59,6 +59,7 @@
 #include <dos.h>
 #include <pc.h>
 #include <sys/farptr.h>
+#include <stdarg.h>
 
 #include "sound.h"
 #include "keyboard.h"
@@ -66,7 +67,13 @@
 /* MIDI music playback by Steven H Don - see third_party/midiplay/NOTICE.md */
 #include "MIDIPLAY.C"
 
-#define MAZE2_VERSION "2.1.0"
+#define MAZE2_VERSION "2.1.1"
+
+/* Interrupt handlers (MIDI timer, INT 9) run with paging possible under Windows'
+ * DPMI (Win9x DOS box, NTVDM). Lock the whole program so they can never touch a
+ * paged-out page; CWSDPMI without a swap file ignores this. */
+#include <crt0.h>
+int _crt0_startup_flags = _CRT0_FLAG_LOCK_MEMORY | _CRT0_FLAG_NONMOVE_SBRK;
 
 /* 64x64 enemy sprites - hand-drawn pixel art */
 #include "sprites/sprite_creeper.h"
@@ -96,7 +103,9 @@
 /* Movement settings */
 #define MOVE_SPEED 3.0           /* world units per second */
 #define ROTATE_SPEED 2.2         /* radians per second (arrow keys) */
-#define MOUSE_SENSITIVITY 0.003  /* radians per mouse count */
+#define MOUSE_SENSITIVITY 0.006  /* radians per screen pixel of mouse travel */
+#define MOUSE_CX 320             /* mouse driver centre in mode 13h (x reported doubled) */
+#define MOUSE_CY 100
 #define MAX_FRAME_DT 0.1         /* clamp for frame time so a stall can't teleport anything */
 
 /* Combat settings */
@@ -298,6 +307,8 @@ static Projectile projectiles[MAX_PROJECTILES];
 static Enemy enemies[MAX_ENEMIES];
 static int numEnemies = 0;
 static int gameRunning = 1;
+static unsigned long hurtUntil = 0;   /* game ms: red border while > now */
+static const char *exitReason = "quit (ESC)";
 
 /* Dynamic lighting */
 static Torch torches[MAX_TORCHES];
@@ -740,9 +751,18 @@ void initMouse(void) {
         mouseAvailable = 1;
         r.x.ax = 2;  /* Hide cursor */
         int86(0x33, &r, &r);
+        r.x.ax = 4;  /* start in the centre (see getMouseDelta) */
+        r.x.cx = MOUSE_CX;
+        r.x.dx = MOUSE_CY;
+        int86(0x33, &r, &r);
     }
 }
 
+/* Mouse look reads the cursor position and puts it back in the screen centre
+ * every frame. Motion counters (fn 11) look simpler, but Windows XP's NTVDM
+ * derives them from the cursor position, which stops dead at a screen edge:
+ * turning one way worked and the other way stalled. In mode 13h the driver
+ * reports x doubled (0..639) and y 0..199. */
 void getMouseDelta(int *dx, int *dy) {
     union REGS r;
 
@@ -752,11 +772,17 @@ void getMouseDelta(int *dx, int *dy) {
         return;
     }
 
-    r.x.ax = 11;
+    r.x.ax = 3;                       /* position + buttons */
     int86(0x33, &r, &r);
+    *dx = ((short)r.x.cx - MOUSE_CX) / 2;
+    *dy = (short)r.x.dx - MOUSE_CY;
 
-    *dx = (short)r.x.cx;
-    *dy = (short)r.x.dx;
+    if (*dx != 0 || *dy != 0) {
+        r.x.ax = 4;                   /* put the cursor back in the centre */
+        r.x.cx = MOUSE_CX;
+        r.x.dx = MOUSE_CY;
+        int86(0x33, &r, &r);
+    }
 }
 
 int getMouseButton(void) {
@@ -823,6 +849,7 @@ void updateProjectiles(void) {
             double dy = newY - player.y;
             if (dx*dx + dy*dy < 0.25) {  /* Hit radius 0.5 */
                 player.health -= 10;
+                hurtUntil = gameMs() + 250;
                 soundPlayerHurt();  /* [SEC-08] Sound effect */
                 projectiles[i].active = 0;
                 continue;
@@ -1919,6 +1946,15 @@ void drawHUD(void) {
     /* Draw mini map in top-right corner */
     drawMiniMap(SCREEN_WIDTH - 52, 4, 48);
 
+    /* Hit flash: red frame around the view for a moment after taking damage */
+    if ((long)(hurtUntil - gameMs()) > 0) {
+        int t;
+        for (t = 0; t < 3; t++) {
+            for (i = 0; i < SCREEN_WIDTH; i++) { setPixel(i, t, COLOR_LRED); setPixel(i, barY - 1 - t, COLOR_LRED); }
+            for (j = 0; j < barY; j++) { setPixel(t, j, COLOR_LRED); setPixel(SCREEN_WIDTH - 1 - t, j, COLOR_LRED); }
+        }
+    }
+
     /* FPS overlay (F1) */
     if (showFps) {
         sprintf(buffer, "FPS %3d", (int)(fpsEstimate + 0.5));
@@ -2289,28 +2325,47 @@ static void initDataDir(const char *argv0) {
  * or timer hooked, the OPL playing, or the screen in mode 13h. */
 static int debugSpawn = 0;
 static double debugX, debugY, debugDeg;
+static int musicEnabled = 1;
+
+/* Stage log written beside the EXE (MAZE2.LOG), flushed after every line, so a
+ * crash on real hardware leaves a record of how far start-up got. */
+static FILE *logFile = NULL;
+static void logStage(const char *fmt, ...) {
+    va_list ap;
+    if (logFile) {
+        va_start(ap, fmt); vfprintf(logFile, fmt, ap); va_end(ap);
+        fputc('\n', logFile);
+        fflush(logFile);
+    }
+    va_start(ap, fmt); vprintf(fmt, ap); va_end(ap);
+    printf("\n");
+}
 
 static int cleanedUp = 0;
 static void cleanup(void) {
     if (cleanedUp) return;
     cleanedUp = 1;
+    logStage("[ EXIT   ] cleanup");
     kb_remove();
     StopMIDI();
     UnloadMIDI();
     sound_shutdown();
     setVideoMode(0x03);
     freeDoubleBuffer();
+    if (logFile) { fclose(logFile); logFile = NULL; }
 }
 
 int main(int argc, char **argv) {
     int musicOn = 0;
+    char buffer[64];
     unsigned long frames = 0, startTicks = 0, playTicks;
 
     initDataDir(argc > 0 ? argv[0] : NULL);
     {
         int i;
         for (i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "-nosound") == 0) soundEnabled = 0;        /* skip the SB probe and music */
+            if (strcmp(argv[i], "-nosound") == 0) soundEnabled = musicEnabled = 0;   /* skip SB probe + music */
+            else if (strcmp(argv[i], "-nomusic") == 0) musicEnabled = 0;            /* skip OPL probe + MIDI */
             else if (strcmp(argv[i], "-at") == 0 && i + 3 < argc) {         /* -at X Y DEGREES: debug spawn */
                 debugSpawn = 1;
                 debugX = atof(argv[i + 1]); debugY = atof(argv[i + 2]); debugDeg = atof(argv[i + 3]);
@@ -2318,13 +2373,20 @@ int main(int argc, char **argv) {
             }
         }
     }
-    printf("MAZE RUNNER 2 v%s - VonHoltenCodes\n", MAZE2_VERSION);
+    {
+        char logPath[300];
+        sprintf(logPath, "%sMAZE2.LOG", dataDir);
+        logFile = fopen(logPath, "w");
+    }
+    logStage("MAZE RUNNER 2 v%s - VonHoltenCodes", MAZE2_VERSION);
+    logStage("[ START  ] dir '%s' sound=%d music=%d", dataDir, soundEnabled, musicEnabled);
 
     /* Initialize systems */
     initDoubleBuffer();
     initFont();
     initTextures();
     initEnemySprites();
+    logStage("[ INIT   ] buffers, font, textures");
     initPlayer();
     if (debugSpawn && worldMap[(int)debugY][(int)debugX] == 0) {
         player.x = debugX;
@@ -2335,8 +2397,11 @@ int main(int argc, char **argv) {
     initEnemies();
     initTorches();
     buildLightMap();
+    logStage("[ INIT   ] level, enemies, light map");
     initSound();
+    logStage("[ AUDIO  ] %s", soundEnabled ? (sound_blaster_present() ? "Sound Blaster" : "PC speaker") : "off (-nosound)");
     initMouse();
+    logStage("[ INPUT  ] %s", mouseAvailable ? "mouse driver found" : "no mouse driver - keyboard only (arrows turn)");
     atexit(cleanup);
 
     /* Start MIDI music: InitMIDI saves the timer vector, SetFM probes the OPL and loads FM.DAT */
@@ -2344,17 +2409,21 @@ int main(int argc, char **argv) {
     sprintf(fmPath, "%sFM.DAT", dataDir);
     sprintf(midPath, "%s1.MID", dataDir);
     FMDataFile = fmPath;
-    if (soundEnabled && SetFM()) {
-        if (LoadMIDI(midPath)) {
-            SetVol(200);
-            PlayMIDI();
-            musicOn = 1;
+    if (musicEnabled) {
+        logStage("[ MUSIC  ] probing OPL synth");
+        if (SetFM()) {
+            logStage("[ MUSIC  ] OPL found, loading %s", midPath);
+            if (LoadMIDI(midPath)) {
+                SetVol(200);
+                PlayMIDI();
+                musicOn = 1;
+            }
         }
     }
-    printf("[ MUSIC  ] %s\n", musicOn ? "OPL FM synth found - MIDI playing" : "no OPL synth or 1.MID - music off");
-    printf("[ INPUT  ] %s\n", mouseAvailable ? "mouse driver found" : "no mouse driver - keyboard only (arrows turn)");
+    logStage("[ MUSIC  ] %s", musicOn ? "MIDI playing (timer hooked)" : musicEnabled ? "no OPL synth or 1.MID - music off" : "off (-nomusic)");
 
     /* Enter VGA mode */
+    logStage("[ VIDEO  ] entering mode 13h");
     setVideoMode(0x13);
 
     /* Show credits splash, then the title (waits for a key via the BIOS) */
@@ -2362,6 +2431,7 @@ int main(int argc, char **argv) {
     delay(1500);
     drawSplashScreen();
     getch();
+    logStage("[ GAME   ] title dismissed, hooking keyboard");
 
     /* Take over the keyboard for the game loop */
     if (!kb_install()) {
@@ -2375,6 +2445,8 @@ int main(int argc, char **argv) {
         int mx, my;
         getMouseDelta(&mx, &my);
     }
+
+    logStage("[ GAME   ] running");
 
     /* Main game loop */
     startTicks = biosTicks();
@@ -2395,6 +2467,7 @@ int main(int argc, char **argv) {
             drawText(100, 90, "EXIT REACHED!", 0);
             displayFrame();
             delay(1500);
+            exitReason = "escaped";
             break;
         }
 
@@ -2405,6 +2478,17 @@ int main(int argc, char **argv) {
     }
 
     playTicks = biosTicks() - startTicks;
+    if (player.health <= 0) {
+        exitReason = "killed";
+        clearScreen(4);   /* red */
+        drawText(120, 80, "YOU DIED", 15);
+        drawText(76, 100, "THE DUNGEON WINS", 14);
+        sprintf(buffer, "SCORE %d", player.score);
+        drawText(120, 120, buffer, 7);
+        displayFrame();
+        delay(2500);
+    }
+    logStage("[ GAME   ] over: %s, score %d, %lu frames in %.1f s", exitReason, player.score, frames, playTicks / 18.2065);
 
     /* Hand the keyboard back to the BIOS before the "press any key" credits */
     kb_remove();
@@ -2416,9 +2500,11 @@ int main(int argc, char **argv) {
     printf("\n");
     printf("========================================\n");
     if (player.health <= 0) {
-        printf("          GAME OVER\n");
-    } else {
+        printf("          GAME OVER - YOU DIED\n");
+    } else if (strcmp(exitReason, "escaped") == 0) {
         printf("       ESCAPE SUCCESSFUL!\n");
+    } else {
+        printf("          QUIT\n");
     }
     printf("========================================\n");
     printf("  Final Score: %d\n", player.score);

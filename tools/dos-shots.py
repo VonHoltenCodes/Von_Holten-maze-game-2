@@ -28,7 +28,7 @@ def sh(*a, **k): return subprocess.run(a, check=False, capture_output=True, text
 
 class Session:
     """one dosbox-x process on the virtual display"""
-    def __init__(self, out, cycles, args="", log="MAZE2.LOG"):
+    def __init__(self, out, cycles, args="", log="MAZE2.OUT"):
         self.out = out; os.makedirs(out, exist_ok=True)
         self.env = dict(os.environ, DISPLAY=DISPLAY)
         self.shots = []
@@ -139,9 +139,9 @@ def tour(cycles, keep):
         s.tap("Return", 1.5); s.shot("exit_text")
     finally:
         s.close(keep)
-    log = os.path.join(EXE_DIR, "MAZE2.LOG")
+    log = os.path.join(EXE_DIR, "MAZE2.OUT")
     if os.path.exists(log):
-        print("--- MAZE2.LOG ---"); print(open(log, errors="replace").read())
+        print("--- MAZE2.OUT ---"); print(open(log, errors="replace").read())
     print(f"{len(s.shots)} screenshots in {out}")
 
 def photos(cycles, keep):
@@ -157,7 +157,7 @@ def photos(cycles, keep):
         ("fps",      "-at 5.5 3.5 0",     lambda s: (s.tap("F1", 0.6))),
     ]
     for name, args, act in plan:
-        s = Session(os.path.join(ROOT, "build", "photos"), cycles, args, log="PHOTO.LOG")
+        s = Session(os.path.join(ROOT, "build", "photos"), cycles, args, log="PHOTO.OUT")
         try:
             if name == "title":
                 time.sleep(TITLE_WAIT); s.shot("title", numbered=False)

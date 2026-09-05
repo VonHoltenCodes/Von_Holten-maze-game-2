@@ -6,7 +6,6 @@
 CC       = $(or $(DJGPP_CC),i586-pc-msdosdjgpp-gcc)
 CFLAGS  ?= -std=gnu99 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-implicit-int -Wno-empty-body \
            -O2 -march=i586 -ffast-math -funroll-loops -Isrc -Ithird_party/midiplay
-LDFLAGS ?= -s
 BUILD   ?= build
 DIST    ?= dist
 VERSION ?= $(shell grep -m1 '^#define MAZE2_VERSION' src/maze2.c | cut -d'"' -f2)
@@ -29,10 +28,16 @@ $(BUILD)/maze2.o: src/maze2.c src/sprites/*.h third_party/midiplay/MIDIPLAY.C sr
 
 # Link, then swap the default go32 stub for CWSDSTUB (CWSDPMI r7 built in) so
 # MAZE2.EXE needs no CWSDPMI.EXE beside it on bare DOS, floppies or DOSBox.
-$(TARGET): $(OBJ)
-	$(CC) $(LDFLAGS) -o $(BUILD)/MAZE2_STUB.EXE $(OBJ) -lm
-	python3 tools/exe2coff.py $(BUILD)/MAZE2_STUB.EXE dos/CWSDSTUB.EXE $@
-	@rm -f $(BUILD)/MAZE2_STUB.EXE
+# build/sym/MAZE2.dbg keeps the symbols: decode a DJGPP crash traceback with
+#   i586-pc-msdosdjgpp-addr2line -f -e build/sym/MAZE2.dbg 0x<eip> ...
+# Both links go to build/sym/ first: the DJGPP driver also drops a lowercase
+# "<name>.exe" with the plain stub next to any output, and DOS would pick that
+# one over MAZE2.EXE if it landed in build/.
+$(TARGET): $(OBJ) Makefile dos/CWSDSTUB.EXE
+	mkdir -p $(BUILD)/sym
+	$(CC) -o $(BUILD)/sym/MAZE2.dbg $(OBJ) -lm
+	$(CC) -s -o $(BUILD)/sym/MAZE2_STUB.EXE $(OBJ) -lm
+	python3 tools/exe2coff.py $(BUILD)/sym/MAZE2_STUB.EXE dos/CWSDSTUB.EXE $@
 	@cp $(DATA) $(BUILD)/
 	@ls -l $(TARGET)
 
