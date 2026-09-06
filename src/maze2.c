@@ -113,6 +113,10 @@ int _crt0_startup_flags = _CRT0_FLAG_LOCK_MEMORY | _CRT0_FLAG_NONMOVE_SBRK;
 #define MOUSE_CX 320             /* mouse driver centre in mode 13h (x reported doubled) */
 #define MOUSE_CY 100
 static int mouseLastX = MOUSE_CX, mouseLastY = MOUSE_CY;
+/* -mouse N: 1 = motion counters (fn 11) only; 2 = position delta + recentre (default);
+ * 3 = like 2 but the driver cursor is left visible; 4 = counters + recentre + visible.
+ * Runtime switch so NTVDM (Windows XP full-screen DOS) can be probed without rebuilding. */
+static int mouseMode = 2;
 static int mouseRawX, mouseRawY, mouseRawMX, mouseRawMY;   /* F1 overlay diagnostics */
 #define MAX_FRAME_DT 0.1         /* clamp for frame time so a stall can't teleport anything */
 
@@ -757,7 +761,7 @@ void initMouse(void) {
 
     if (r.x.ax == 0xFFFF) {
         mouseAvailable = 1;
-        r.x.ax = 2;  /* Hide cursor */
+        r.x.ax = (mouseMode >= 3) ? 1 : 2;  /* hide the cursor (modes 3/4 keep it shown) */
         int86(0x33, &r, &r);
         r.x.ax = 7;  /* horizontal range 0..639 (mode 13h reports x doubled) */
         r.x.cx = 0; r.x.dx = 639;
@@ -790,7 +794,7 @@ void getMouseDelta(int *dx, int *dy) {
         return;
     }
 
-    r.x.ax = 11;                      /* motion counters, read for the overlay only */
+    r.x.ax = 11;                      /* motion counters (mickeys since last call) */
     int86(0x33, &r, &r);
     mouseRawMX = (short)r.x.cx; mouseRawMY = (short)r.x.dx;
 
@@ -799,10 +803,16 @@ void getMouseDelta(int *dx, int *dy) {
     x = (short)r.x.cx; y = (short)r.x.dx;
     mouseRawX = x; mouseRawY = y;
 
-    /* delta against the last position we saw, not against the centre: if the
-     * driver ignores "set position" (some NTVDM setups) this still tracks motion */
-    *dx = (x - mouseLastX) / 2;
-    *dy = y - mouseLastY;
+    if (mouseMode == 1 || mouseMode == 4) {
+        *dx = mouseRawMX / 2;
+        *dy = mouseRawMY / 2;
+        if (mouseMode == 1) return;
+    } else {
+        /* delta against the last position we saw, not against the centre: if the
+         * driver ignores "set position" (some NTVDM setups) this still tracks motion */
+        *dx = (x - mouseLastX) / 2;
+        *dy = y - mouseLastY;
+    }
 
     if (x != MOUSE_CX || y != MOUSE_CY) {
         r.x.ax = 4;                   /* back to the centre so the edges are never reached */
@@ -1993,7 +2003,7 @@ void drawHUD(void) {
         drawText(4, 4, buffer, COLOR_LGREEN);
         sprintf(buffer, "X%4.1f Y%4.1f", player.x, player.y);
         drawText(4, 14, buffer, COLOR_GRAY);
-        sprintf(buffer, "M%4d,%3d D%4d,%3d", mouseRawX, mouseRawY, mouseRawMX, mouseRawMY);
+        sprintf(buffer, "M%d P%4d,%3d C%4d,%3d", mouseMode, mouseRawX, mouseRawY, mouseRawMX, mouseRawMY);
         drawText(4, 24, buffer, COLOR_GRAY);   /* mouse position / motion counters as the driver reports them */
     }
 
@@ -2402,6 +2412,7 @@ int main(int argc, char **argv) {
         for (i = 1; i < argc; i++) {
             if (strcmp(argv[i], "-nosound") == 0) soundEnabled = musicEnabled = 0;   /* skip SB probe + music */
             else if (strcmp(argv[i], "-nomusic") == 0) musicEnabled = 0;            /* skip OPL probe + MIDI */
+            else if (strcmp(argv[i], "-mouse") == 0 && i + 1 < argc) { mouseMode = atoi(argv[++i]); if (mouseMode < 1 || mouseMode > 4) mouseMode = 2; }
             else if (strcmp(argv[i], "-at") == 0 && i + 3 < argc) {         /* -at X Y DEGREES: debug spawn */
                 debugSpawn = 1;
                 debugX = atof(argv[i + 1]); debugY = atof(argv[i + 2]); debugDeg = atof(argv[i + 3]);
@@ -2437,7 +2448,7 @@ int main(int argc, char **argv) {
     initSound();
     logStage("[ AUDIO  ] %s", soundEnabled ? (sound_blaster_present() ? "Sound Blaster" : "PC speaker") : "off (-nosound)");
     initMouse();
-    logStage("[ INPUT  ] %s", mouseAvailable ? "mouse driver found" : "no mouse driver - keyboard only (arrows turn)");
+    logStage("[ INPUT  ] %s (mouse mode %d)", mouseAvailable ? "mouse driver found" : "no mouse driver - keyboard only (arrows turn)", mouseMode);
     atexit(cleanup);
 
     /* Start MIDI music: InitMIDI saves the timer vector, SetFM probes the OPL and loads FM.DAT */
